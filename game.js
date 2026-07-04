@@ -102,6 +102,76 @@ Entity.counter = 0;
 Entity.prototype.getCenterX = function(){return (this.x+(this.isBuilding?this.size/2:0.5))*TILE_SIZE;};
 Entity.prototype.getCenterY = function(){return (this.y+(this.isBuilding?this.size/2:0.5))*TILE_SIZE;};
 
+// ===================== BINARY HEAP =====================
+function BinaryHeap(scoreFunc) {
+  this.content = [];
+  this.scoreFunc = scoreFunc;
+}
+BinaryHeap.prototype.push = function(element) {
+  this.content.push(element);
+  this._bubbleUp(this.content.length - 1);
+};
+BinaryHeap.prototype.pop = function() {
+  var result = this.content[0];
+  var end = this.content.pop();
+  if (this.content.length > 0) {
+    this.content[0] = end;
+    this._sinkDown(0);
+  }
+  return result;
+};
+BinaryHeap.prototype.remove = function(node) {
+  var len = this.content.length;
+  for (var i = 0; i < len; i++) {
+    if (this.content[i] === node) {
+      var end = this.content.pop();
+      if (i !== len - 1) {
+        this.content[i] = end;
+        if (this.scoreFunc(end) < this.scoreFunc(node)) this._bubbleUp(i);
+        else this._sinkDown(i);
+      }
+      return;
+    }
+  }
+};
+BinaryHeap.prototype.size = function() { return this.content.length; };
+BinaryHeap.prototype._bubbleUp = function(n) {
+  var element = this.content[n];
+  while (n > 0) {
+    var parentN = Math.floor((n + 1) / 2) - 1;
+    var parent = this.content[parentN];
+    if (this.scoreFunc(element) < this.scoreFunc(parent)) {
+      this.content[parentN] = element;
+      this.content[n] = parent;
+      n = parentN;
+    } else break;
+  }
+};
+BinaryHeap.prototype._sinkDown = function(n) {
+  var length = this.content.length;
+  var element = this.content[n];
+  while (true) {
+    var child2N = (n + 1) * 2;
+    var child1N = child2N - 1;
+    var swap = -1;
+    var child1Score, child2Score;
+    if (child1N < length) {
+      var child1 = this.content[child1N];
+      child1Score = this.scoreFunc(child1);
+      if (child1Score < this.scoreFunc(element)) swap = child1N;
+    }
+    if (child2N < length) {
+      var child2 = this.content[child2N];
+      child2Score = this.scoreFunc(child2);
+      if (child2Score < (swap === -1 ? this.scoreFunc(element) : child1Score)) swap = child2N;
+    }
+    if (swap === -1) break;
+    this.content[n] = this.content[swap];
+    this.content[swap] = element;
+    n = swap;
+  }
+};
+
 // ===================== MAP =====================
 function GameMap() {
   this.terrain = []; this.oreAmount = []; this.occupancy = [];
@@ -265,18 +335,21 @@ function GameMap() {
     ex=Math.max(0,Math.min(MAP_WIDTH-1,Math.floor(ex)));
     ey=Math.max(0,Math.min(MAP_HEIGHT-1,Math.floor(ey)));
     if (sx===ex&&sy===ey) return [];
-    maxIter = maxIter || 2500;
-    var open=[], closed={}, gScore={}, cameFrom={};
+    maxIter = maxIter || 3000;
+    var open = new BinaryHeap(function(n){return n.f;});
+    var closed={}, gScore={}, cameFrom={}, inOpen={};
     var sk = sx+','+sy;
     gScore[sk] = 0;
-    open.push({x:sx,y:sy,f:Math.abs(ex-sx)+Math.abs(ey-sy)});
+    var startNode = {x:sx,y:sy,f:Math.abs(ex-sx)+Math.abs(ey-sy)};
+    open.push(startNode);
+    inOpen[sk] = startNode;
     var dirs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]];
     var itr=0, closest={x:sx,y:sy,d:Math.abs(ex-sx)+Math.abs(ey-sy)};
-    while (open.length>0 && itr<maxIter) {
+    while (open.size()>0 && itr<maxIter) {
       itr++;
-      open.sort(function(a,b){return a.f-b.f;});
-      var cur = open.shift();
+      var cur = open.pop();
       var ck = cur.x+','+cur.y;
+      delete inOpen[ck];
       var ch = Math.abs(ex-cur.x)+Math.abs(ey-cur.y);
       if (ch < closest.d) closest = {x:cur.x,y:cur.y,d:ch};
       if (cur.x===ex&&cur.y===ey) {
@@ -304,11 +377,14 @@ function GameMap() {
           gScore[nk] = tg;
           var h = Math.abs(ex-nx)+Math.abs(ey-ny);
           cameFrom[nk] = ck;
-          var inO = false;
-          for (var oi=0;oi<open.length;oi++) {
-            if (open[oi].x===nx&&open[oi].y===ny) { open[oi].f=tg+h; inO=true; break; }
+          if (inOpen[nk]) {
+            inOpen[nk].f = tg+h;
+            open._bubbleUp(open.content.indexOf(inOpen[nk]));
+          } else {
+            var nn = {x:nx,y:ny,f:tg+h};
+            open.push(nn);
+            inOpen[nk] = nn;
           }
-          if (!inO) open.push({x:nx,y:ny,f:tg+h});
         }
       }
     }
@@ -325,10 +401,63 @@ function GameMap() {
   };
 }
 
+// ===================== SPATIAL GRID =====================
+var SPATIAL_CELL = 8;
+var SpatialGrid = (function(){
+  function SG(mapW, mapH) {
+    this.cols = Math.ceil(mapW/SPATIAL_CELL);
+    this.rows = Math.ceil(mapH/SPATIAL_CELL);
+    this.cells = [];
+    this._rebuild();
+  }
+  SG.prototype._rebuild = function(){
+    this.cells = [];
+    for (var i=0;i<this.rows*this.cols;i++) this.cells[i]=[];
+  };
+  SG.prototype.update = function(entities){
+    this._rebuild();
+    for (var i=0;i<entities.length;i++){
+      var e = entities[i];
+      if (e.dead||!e.built) continue;
+      var cx = Math.floor(e.x/SPATIAL_CELL);
+      var cy = Math.floor(e.y/SPATIAL_CELL);
+      if (cx<0) cx=0; if (cx>=this.cols) cx=this.cols-1;
+      if (cy<0) cy=0; if (cy>=this.rows) cy=this.rows-1;
+      this.cells[cy*this.cols+cx].push(e);
+      if (e.isBuilding && e.size>1) {
+        var cx2 = Math.floor((e.x+e.size-1)/SPATIAL_CELL);
+        var cy2 = Math.floor((e.y+e.size-1)/SPATIAL_CELL);
+        if (cx2>=this.cols) cx2=this.cols-1;
+        if (cy2>=this.rows) cy2=this.rows-1;
+        for (var by=cy;by<=cy2;by++) for (var bx=cx;bx<=cx2;bx++){
+          if (bx===cx&&by===cy) continue;
+          this.cells[by*this.cols+bx].push(e);
+        }
+      }
+    }
+  };
+  SG.prototype.queryRange = function(x,y,range){
+    var results = [];
+    var r = Math.ceil(range/SPATIAL_CELL)+1;
+    var cx = Math.floor(x/SPATIAL_CELL);
+    var cy = Math.floor(y/SPATIAL_CELL);
+    for (var dy=-r;dy<=r;dy++) for (var dx=-r;dx<=r;dx++){
+      var bx=cx+dx, by=cy+dy;
+      if (bx<0||bx>=this.cols||by<0||by>=this.rows) continue;
+      var cell = this.cells[by*this.cols+bx];
+      for (var i=0;i<cell.length;i++) results.push(cell[i]);
+    }
+    return results;
+  };
+  return SG;
+})();
+
 // ===================== GAME STATE =====================
 function GameState() {
   this.map = new GameMap();
   this.entities = [];
+  this.spatialGrid = new SpatialGrid(MAP_WIDTH, MAP_HEIGHT);
+  this.spatialDirty = true;
   this.projectiles = [];
   this.explosions = [];
   this.floatingTexts = [];
@@ -346,10 +475,28 @@ function GameState() {
   this.lowPowerAlertCooldown = 0;
   this.underAttackAlertCooldown = 0;
 
-  this.getPlayerBuildings = function(){return this.entities.filter(function(e){return e.team===TEAM_PLAYER&&e.isBuilding&&!e.dead;});};
-  this.getEnemyBuildings = function(){return this.entities.filter(function(e){return e.team===TEAM_ENEMY&&e.isBuilding&&!e.dead;});};
-  this.getPlayerUnits = function(){return this.entities.filter(function(e){return e.team===TEAM_PLAYER&&!e.isBuilding&&!e.dead;});};
-  this.getEnemyUnits = function(){return this.entities.filter(function(e){return e.team===TEAM_ENEMY&&!e.isBuilding&&!e.dead;});};
+  this._playerBuildings = null;
+  this._enemyBuildings = null;
+  this._playerUnits = null;
+  this._enemyUnits = null;
+  this._listDirty = true;
+
+  this.getPlayerBuildings = function(){
+    if (this._listDirty||!this._playerBuildings) this._playerBuildings=this.entities.filter(function(e){return e.team===TEAM_PLAYER&&e.isBuilding&&!e.dead;});
+    return this._playerBuildings;
+  };
+  this.getEnemyBuildings = function(){
+    if (this._listDirty||!this._enemyBuildings) this._enemyBuildings=this.entities.filter(function(e){return e.team===TEAM_ENEMY&&e.isBuilding&&!e.dead;});
+    return this._enemyBuildings;
+  };
+  this.getPlayerUnits = function(){
+    if (this._listDirty||!this._playerUnits) this._playerUnits=this.entities.filter(function(e){return e.team===TEAM_PLAYER&&!e.isBuilding&&!e.dead;});
+    return this._playerUnits;
+  };
+  this.getEnemyUnits = function(){
+    if (this._listDirty||!this._enemyUnits) this._enemyUnits=this.entities.filter(function(e){return e.team===TEAM_ENEMY&&!e.isBuilding&&!e.dead;});
+    return this._enemyUnits;
+  };
 
   this.hasBuilding = function(team,type){
     return this.entities.some(function(e){return e.team===team&&e.type===type&&e.built&&!e.dead;});
@@ -400,6 +547,8 @@ function GameState() {
     var e = new Entity(type,team,x,y);
     this.entities.push(e);
     if (e.isBuilding) this.map.setOccupancy(e);
+    this.spatialDirty = true;
+    this._listDirty = true;
     return e;
   };
 
@@ -407,6 +556,8 @@ function GameState() {
     if (entity.isBuilding) this.map.clearOccupancy(entity);
     entity.dead = true;
     entity.deathTimer = 45;
+    this.spatialDirty = true;
+    this._listDirty = true;
     if (entity.team===TEAM_PLAYER) {
       if (entity.isBuilding) this.stats.buildingsLost++; else this.stats.unitsLost++;
     } else {
@@ -440,11 +591,13 @@ function GameState() {
   };
 
   this.getEnemiesInRange = function(entity,range){
+    if (this.spatialDirty) { this.spatialGrid.update(this.entities); this.spatialDirty=false; }
     var r = [];
     var ex = entity.getCenterX(), ey = entity.getCenterY();
     var rp = range*TILE_SIZE;
-    for (var i=0;i<this.entities.length;i++) {
-      var e = this.entities[i];
+    var nearby = this.spatialGrid.queryRange(ex/TILE_SIZE, ey/TILE_SIZE, range+2);
+    for (var i=0;i<nearby.length;i++) {
+      var e = nearby[i];
       if (e.team!==entity.team&&!e.dead&&e.built) {
         if (Math.hypot(ex-e.getCenterX(),ey-e.getCenterY())<=rp) r.push(e);
       }
@@ -675,6 +828,8 @@ function updateCamera() {
 
 // ===================== UPDATE ENTITIES =====================
 function updateEntities() {
+  gameState.spatialDirty = true;
+  gameState._listDirty = false;
   for (var i = gameState.entities.length-1; i >= 0; i--) {
     var e = gameState.entities[i];
     if (e.dead) {
@@ -2135,26 +2290,41 @@ function drawUnit(e,ex,ey2,tc,td) {
 }
 
 // ===================== MINIMAP =====================
+var minimapTerrainCanvas = null;
+var minimapTerrainDirty = true;
 function renderMinimap() {
   var mw = minimapCanvas.width, mh = minimapCanvas.height;
   var sx = mw/MAP_WIDTH, sy = mh/MAP_HEIGHT;
-  minimapCtx.fillStyle = '#060610';
-  minimapCtx.fillRect(0,0,mw,mh);
 
-  for (var my=0;my<MAP_HEIGHT;my+=1) {
-    for (var mx=0;mx<MAP_WIDTH;mx+=1) {
-      var t = gameState.map.terrain[my][mx];
-      if (t===GRASS) minimapCtx.fillStyle = '#2d5a1e';
-      else if (t===WATER) minimapCtx.fillStyle = '#1a5276';
-      else if (t===ORE) minimapCtx.fillStyle = '#c9a800';
-      else if (t===ROCK) minimapCtx.fillStyle = '#4a5568';
-      else if (t===CONCRETE) minimapCtx.fillStyle = '#3d3d3d';
-      else if (t===SAND) minimapCtx.fillStyle = '#9a7d0a';
-      else if (t===TREE) minimapCtx.fillStyle = '#1e4a10';
-      else continue;
-      minimapCtx.fillRect(mx*sx,my*sy,sx+1,sy+1);
-    }
+  if (!minimapTerrainCanvas) {
+    minimapTerrainCanvas = document.createElement('canvas');
+    minimapTerrainCanvas.width = mw;
+    minimapTerrainCanvas.height = mh;
+    minimapTerrainDirty = true;
   }
+  if (minimapTerrainDirty || frameCount%120===0) {
+    var tCtx = minimapTerrainCanvas.getContext('2d');
+    tCtx.fillStyle = '#060610';
+    tCtx.fillRect(0,0,mw,mh);
+    for (var my=0;my<MAP_HEIGHT;my+=1) {
+      for (var mx=0;mx<MAP_WIDTH;mx+=1) {
+        var t = gameState.map.terrain[my][mx];
+        if (t===GRASS) tCtx.fillStyle = '#2d5a1e';
+        else if (t===WATER) tCtx.fillStyle = '#1a5276';
+        else if (t===ORE) tCtx.fillStyle = '#c9a800';
+        else if (t===ROCK) tCtx.fillStyle = '#4a5568';
+        else if (t===CONCRETE) tCtx.fillStyle = '#3d3d3d';
+        else if (t===SAND) tCtx.fillStyle = '#9a7d0a';
+        else if (t===TREE) tCtx.fillStyle = '#1e4a10';
+        else continue;
+        tCtx.fillRect(mx*sx,my*sy,sx+1,sy+1);
+      }
+    }
+    minimapTerrainDirty = false;
+  }
+
+  minimapCtx.drawImage(minimapTerrainCanvas, 0, 0);
+
   for (var i=0;i<gameState.entities.length;i++) {
     var e = gameState.entities[i];
     if (e.dead) continue;
@@ -2370,7 +2540,7 @@ function updateUI() {
   document.getElementById('btnSell').classList.toggle('disabled',gameState.getPlayerBuildings().length===0);
   document.getElementById('btnStop').classList.toggle('disabled',selectedUnits.length===0);
 
-  if (frameCount%20===0) updateBuildList();
+  if (frameCount%60===0) updateBuildList();
 }
 
 function notify(text,kind) {

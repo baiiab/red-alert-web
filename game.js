@@ -607,8 +607,8 @@ function startGame(diff) {
   gameState.map.generate();
   gameState.initPlayer();
   gameState.initEnemy();
-  camera.x = 3*TILE_SIZE-(canvas.width-300)/2;
-  camera.y = 3*TILE_SIZE-canvas.height/2;
+  camera.x = 3*TILE_SIZE*camera.zoom-(canvas.width-300)/2;
+  camera.y = 3*TILE_SIZE*camera.zoom-canvas.height/2;
   camera.x = Math.max(0,camera.x); camera.y = Math.max(0,camera.y);
   selectedUnits = []; selectedBuilding = null;
   placingBuilding = false; placingType = null;
@@ -667,8 +667,8 @@ function updateCamera() {
     if (mouse.y > 44 && mouse.y < 44 + edge && mouse.x > 0 && mouse.x < viewW) camera.y -= 10;
     if (mouse.y > viewH - edge && mouse.y < viewH && mouse.x > 0 && mouse.x < viewW) camera.y += 10;
   }
-  var maxX = MAP_WIDTH*TILE_SIZE-(canvas.width-300);
-  var maxY = MAP_HEIGHT*TILE_SIZE-canvas.height;
+  var maxX = MAP_WIDTH*TILE_SIZE*camera.zoom-(canvas.width-300);
+  var maxY = MAP_HEIGHT*TILE_SIZE*camera.zoom-canvas.height;
   camera.x = Math.max(0,Math.min(maxX,camera.x));
   camera.y = Math.max(0,Math.min(maxY,camera.y));
 }
@@ -690,10 +690,11 @@ function updateEntities() {
     if (!e.dead&&e.hp<e.maxHp*0.4&&frameCount%18===0) {
       gameState.addSmoke(e.getCenterX()+(Math.random()-0.5)*8, e.getCenterY()+(Math.random()-0.5)*8);
     }
-    if (e.isBuilding) updateBuildingAI(e);
-    else {
+    if (e.isBuilding) {
+      updateBuildingAI(e);
+    } else {
       if (e.fireCooldown>0) e.fireCooldown--;
-      updateUnitAI(e);
+      if (e.team !== TEAM_ENEMY) updateUnitAI(e);
     }
   }
   updateRepairBays();
@@ -1309,21 +1310,18 @@ function startBuild(type,team) {
 
 function findProducingBuilding(type,team) {
   var def = UNIT_DEFS[type]; if (!def) return null;
+  var fallback = null;
   for (var i=0;i<gameState.entities.length;i++) {
     var e = gameState.entities[i];
-    if (e.team===team&&e.built&&!e.dead&&!e.producing&&e.isBuilding) {
-      if (type==='harvester'&&e.type==='refinery') return e;
-      if (def.requires&&def.requires.indexOf(e.type)>=0) return e;
+    if (e.team===team&&e.built&&!e.dead&&e.isBuilding) {
+      var match = (type==='harvester'&&e.type==='refinery')||(def.requires&&def.requires.indexOf(e.type)>=0);
+      if (match) {
+        if (!e.producing) return e;
+        if (!fallback) fallback = e;
+      }
     }
   }
-  for (var j=0;j<gameState.entities.length;j++) {
-    var e2 = gameState.entities[j];
-    if (e2.team===team&&e2.built&&!e2.dead&&e2.isBuilding) {
-      if (type==='harvester'&&e2.type==='refinery') return e2;
-      if (def.requires&&def.requires.indexOf(e2.type)>=0) return e2;
-    }
-  }
-  return null;
+  return fallback;
 }
 
 // ===================== ACTIONS =====================
@@ -1454,16 +1452,23 @@ function render() {
 
   var viewWidth = canvas.width-300;
   var viewHeight = canvas.height;
-  var startTX = Math.max(0,Math.floor(camera.x/TILE_SIZE));
-  var startTY = Math.max(0,Math.floor(camera.y/TILE_SIZE));
-  var endTX = Math.min(MAP_WIDTH,Math.ceil((camera.x+viewWidth)/TILE_SIZE)+1);
-  var endTY = Math.min(MAP_HEIGHT,Math.ceil((camera.y+viewHeight)/TILE_SIZE)+1);
+  var zoom = camera.zoom;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0,0,viewWidth,viewHeight);
+  ctx.clip();
+  ctx.scale(zoom, zoom);
+  ctx.translate(-camera.x/zoom, -camera.y/zoom);
+  var startTX = Math.max(0,Math.floor(camera.x/zoom/TILE_SIZE));
+  var startTY = Math.max(0,Math.floor(camera.y/zoom/TILE_SIZE));
+  var endTX = Math.min(MAP_WIDTH,Math.ceil((camera.x/zoom+viewWidth/zoom)/TILE_SIZE)+1);
+  var endTY = Math.min(MAP_HEIGHT,Math.ceil((camera.y/zoom+viewHeight/zoom)/TILE_SIZE)+1);
 
   // Terrain
   for (var ty=startTY;ty<endTY;ty++) {
     for (var tx=startTX;tx<endTX;tx++) {
-      var sx = tx*TILE_SIZE-camera.x;
-      var sy = ty*TILE_SIZE-camera.y;
+      var sx = tx*TILE_SIZE;
+      var sy = ty*TILE_SIZE;
       var terrain = gameState.map.terrain[ty][tx];
       if (terrain===ORE) {
         ctx.fillStyle = '#2d5a1e'; ctx.fillRect(sx,sy,TILE_SIZE,TILE_SIZE);
@@ -1502,10 +1507,10 @@ function render() {
   });
   for (var ei=0;ei<sortedE.length;ei++) {
     var e = sortedE[ei];
-    var ex = e.x*TILE_SIZE-camera.x;
-    var ey2 = e.y*TILE_SIZE-camera.y;
+    var ex = e.x*TILE_SIZE;
+    var ey2 = e.y*TILE_SIZE;
     var eS = e.size*TILE_SIZE;
-    if (ex+eS<0||ey2+eS<0||ex>viewWidth||ey2>viewHeight) continue;
+    if (ex+eS<camera.x/zoom||ey2+eS<camera.y/zoom||ex>camera.x/zoom+viewWidth/zoom||ey2>camera.y/zoom+viewHeight/zoom) continue;
     if (e.dead) {
       ctx.globalAlpha = e.deathTimer/45;
       ctx.fillStyle = '#1a1a1a';
@@ -1563,8 +1568,8 @@ function render() {
   // Smoke particles
   for (var smi=0;smi<gameState.smokeParticles.length;smi++) {
     var sm = gameState.smokeParticles[smi];
-    var smx = sm.x-camera.x, smy = sm.y-camera.y;
-    if (smx<-20||smy<-20||smx>viewWidth+20||smy>viewHeight+20) continue;
+    var smx = sm.x, smy = sm.y;
+    if (smx<camera.x/zoom-20||smy<camera.y/zoom-20||smx>camera.x/zoom+viewWidth/zoom+20||smy>camera.y/zoom+viewHeight/zoom+20) continue;
     var alpha = sm.timer/sm.maxTimer*0.4;
     ctx.fillStyle = 'rgba(80,80,80,'+alpha+')';
     ctx.beginPath();
@@ -1575,7 +1580,7 @@ function render() {
   // Projectiles
   for (var pi=0;pi<gameState.projectiles.length;pi++) {
     var p = gameState.projectiles[pi];
-    var px = p.x-camera.x, py = p.y-camera.y;
+    var px = p.x, py = p.y;
     if (p.type==='bullet') {
       ctx.fillStyle = '#ffe234';
       ctx.beginPath(); ctx.arc(px,py,2.5,0,Math.PI*2); ctx.fill();
@@ -1615,8 +1620,8 @@ function render() {
       var dxL = p.targetX-p.x, dyL = p.targetY-p.y;
       for (var li=1;li<=segs;li++) {
         var lt = li/segs;
-        var lx = p.x+dxL*lt-camera.x+(Math.random()-0.5)*12;
-        var ly = p.y+dyL*lt-camera.y+(Math.random()-0.5)*12;
+        var lx = p.x+dxL*lt+(Math.random()-0.5)*12;
+        var ly = p.y+dyL*lt+(Math.random()-0.5)*12;
         ctx.lineTo(lx,ly);
       }
       ctx.stroke();
@@ -1628,7 +1633,7 @@ function render() {
   // Explosions
   for (var xi=0;xi<gameState.explosions.length;xi++) {
     var exp = gameState.explosions[xi];
-    var expX = exp.x-camera.x, expY = exp.y-camera.y;
+    var expX = exp.x, expY = exp.y;
     var prog = 1-exp.timer/exp.maxTimer;
     var es2 = exp.size*(0.4+prog*0.8);
     if (exp.type==='fire'||exp.type==='big') {
@@ -1672,7 +1677,7 @@ function render() {
   ctx.font = 'bold 12px Arial';
   for (var fi=0;fi<gameState.floatingTexts.length;fi++) {
     var ft = gameState.floatingTexts[fi];
-    var ftx = ft.x-camera.x, fty = ft.y-camera.y;
+    var ftx = ft.x, fty = ft.y;
     ctx.globalAlpha = ft.timer/50;
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillText(ft.text,ftx+1,fty+1);
@@ -1687,8 +1692,8 @@ function render() {
     var pd2 = BUILDING_DEFS[placingType]||DEFENSE_DEFS[placingType];
     if (pd2) {
       var pS = pd2.size*TILE_SIZE;
-      var pgx = mouse.mapX*TILE_SIZE-camera.x;
-      var pgy = mouse.mapY*TILE_SIZE-camera.y;
+      var pgx = mouse.mapX*TILE_SIZE;
+      var pgy = mouse.mapY*TILE_SIZE;
       var canPlace = gameState.map.isBuildable(mouse.mapX,mouse.mapY,pd2.size)&&
                      gameState.map.isNearBuilding(mouse.mapX,mouse.mapY,pd2.size,TEAM_PLAYER);
       ctx.globalAlpha = 0.5;
@@ -1710,6 +1715,10 @@ function render() {
       }
     }
   }
+
+  ctx.restore();
+
+  // === Screen-space overlays (not affected by zoom) ===
 
   // Drag select rectangle
   if (dragSelect.active) {
@@ -2105,8 +2114,8 @@ function drawUnit(e,ex,ey2,tc,td) {
   // Movement waypoint indicator
   if (e.selected&&e.path.length>0&&e.pathIndex<e.path.length) {
     var lastWP = e.path[e.path.length-1];
-    var wpX = (lastWP.x+0.5)*TILE_SIZE-camera.x;
-    var wpY = (lastWP.y+0.5)*TILE_SIZE-camera.y;
+    var wpX = (lastWP.x+0.5)*TILE_SIZE;
+    var wpY = (lastWP.y+0.5)*TILE_SIZE;
     ctx.strokeStyle = 'rgba(46,204,113,0.5)';
     ctx.lineWidth = 1;
     ctx.setLineDash([3,3]);
@@ -2171,10 +2180,10 @@ function renderMinimap() {
   // Viewport rect
   minimapCtx.strokeStyle = 'rgba(255,255,255,0.7)';
   minimapCtx.lineWidth = 1;
-  var vpX = camera.x/TILE_SIZE*sx;
-  var vpY = camera.y/TILE_SIZE*sy;
-  var vpW = (canvas.width-300)/TILE_SIZE*sx;
-  var vpH = canvas.height/TILE_SIZE*sy;
+  var vpX = camera.x/camera.zoom/TILE_SIZE*sx;
+  var vpY = camera.y/camera.zoom/TILE_SIZE*sy;
+  var vpW = (canvas.width-300)/camera.zoom/TILE_SIZE*sx;
+  var vpH = canvas.height/camera.zoom/TILE_SIZE*sy;
   minimapCtx.strokeRect(vpX,vpY,vpW,vpH);
 }
 
@@ -2458,10 +2467,10 @@ function selectGroup(n) {
     if (selectedUnits.length>0) {
       var cx = selectedUnits.reduce(function(s,u){return s+u.x;},0)/selectedUnits.length;
       var cy = selectedUnits.reduce(function(s,u){return s+u.y;},0)/selectedUnits.length;
-      camera.x = cx*TILE_SIZE-(canvas.width-300)/2;
-      camera.y = cy*TILE_SIZE-canvas.height/2;
-      camera.x = Math.max(0,Math.min(MAP_WIDTH*TILE_SIZE-(canvas.width-300),camera.x));
-      camera.y = Math.max(0,Math.min(MAP_HEIGHT*TILE_SIZE-canvas.height,camera.y));
+      camera.x = cx*TILE_SIZE*camera.zoom-(canvas.width-300)/2;
+      camera.y = cy*TILE_SIZE*camera.zoom-canvas.height/2;
+      camera.x = Math.max(0,Math.min(MAP_WIDTH*TILE_SIZE*camera.zoom-(canvas.width-300),camera.x));
+      camera.y = Math.max(0,Math.min(MAP_HEIGHT*TILE_SIZE*camera.zoom-canvas.height,camera.y));
     }
   }
   lastNumberKey = n; lastNumberTime = now;
@@ -2479,8 +2488,8 @@ function setupInput() {
     mouse.inCanvas = (mouse.x >= 0 && mouse.x < viewW && mouse.y >= 0 && mouse.y < viewH);
     var clampedX = Math.max(0, Math.min(viewW, mouse.x));
     var clampedY = Math.max(0, Math.min(viewH, mouse.y));
-    mouse.worldX = clampedX+camera.x;
-    mouse.worldY = clampedY+camera.y;
+    mouse.worldX = (clampedX + camera.x) / camera.zoom;
+    mouse.worldY = (clampedY + camera.y) / camera.zoom;
     mouse.mapX = Math.max(0,Math.min(MAP_WIDTH-1,Math.floor(mouse.worldX/TILE_SIZE)));
     mouse.mapY = Math.max(0,Math.min(MAP_HEIGHT-1,Math.floor(mouse.worldY/TILE_SIZE)));
     if (dragSelect.active) { dragSelect.endX = mouse.x; dragSelect.endY = mouse.y; }
@@ -2515,6 +2524,29 @@ function setupInput() {
         } else { notify('无法在此处建造','warn'); playCancelSound(); }
         return;
       }
+      // Attack-move: if pending, treat left click as attack-move target
+      if (pendingAttackMove && selectedUnits.length > 0 && mouse.inCanvas) {
+        var amTarget = gameState.getEntityAt(mouse.worldX, mouse.worldY);
+        if (amTarget && amTarget.team !== TEAM_PLAYER && !amTarget.dead) {
+          selectedUnits.forEach(function(u){
+            u.attackTarget = amTarget; u.path = []; u.pathIndex = 0;
+            u.attackMoveTarget = null; u.guardPos = null;
+          });
+          gameState.addFloatingText(amTarget.getCenterX(), amTarget.getCenterY()-15, '攻击!', '#e74c3c');
+        } else {
+          var amx = mouse.mapX, amy = mouse.mapY;
+          selectedUnits.forEach(function(u){
+            u.attackTarget = null;
+            u.attackMoveTarget = {x: amx, y: amy};
+            u.guardPos = null;
+            u.path = gameState.map.findPath(Math.floor(u.x), Math.floor(u.y), amx, amy);
+            u.pathIndex = 0;
+          });
+          gameState.addFloatingText(mouse.worldX, mouse.worldY, 'A→', '#e67e22');
+        }
+        pendingAttackMove = false;
+        return;
+      }
       // Start drag-select
       dragSelect.active = true;
       dragSelect.startX = mouse.x; dragSelect.startY = mouse.y;
@@ -2527,10 +2559,10 @@ function setupInput() {
       var dx = Math.abs(dragSelect.endX-dragSelect.startX);
       var dy = Math.abs(dragSelect.endY-dragSelect.startY);
       if (dx>8||dy>8) {
-        var wx1 = Math.min(dragSelect.startX,dragSelect.endX)+camera.x;
-        var wy1 = Math.min(dragSelect.startY,dragSelect.endY)+camera.y;
-        var wx2 = Math.max(dragSelect.startX,dragSelect.endX)+camera.x;
-        var wy2 = Math.max(dragSelect.startY,dragSelect.endY)+camera.y;
+        var wx1 = (Math.min(dragSelect.startX,dragSelect.endX)+camera.x)/camera.zoom;
+        var wy1 = (Math.min(dragSelect.startY,dragSelect.endY)+camera.y)/camera.zoom;
+        var wx2 = (Math.max(dragSelect.startX,dragSelect.endX)+camera.x)/camera.zoom;
+        var wy2 = (Math.max(dragSelect.startY,dragSelect.endY)+camera.y)/camera.zoom;
         if (!ev.shiftKey) {
           selectedUnits.forEach(function(u){u.selected=false;});
           selectedUnits = [];
@@ -2587,6 +2619,7 @@ function setupInput() {
 
   canvas.addEventListener('contextmenu',function(ev){
     ev.preventDefault();
+    pendingAttackMove = false;
     if (placingBuilding) { placingBuilding=false; placingType=null; playCancelSound(); return; }
     if (activeAction) { activeAction = null;
       document.getElementById('btnRepair').classList.remove('active');
@@ -2657,6 +2690,16 @@ function setupInput() {
         hideHelp();
       }
     }
+    if (ev.code==='Delete'||ev.code==='Backspace') {
+      if (selectedUnits.length>0) {
+        selectedUnits.forEach(function(u){
+          u.selected = false;
+          gameState.removeEntity(u);
+        });
+        selectedUnits = [];
+        notify('已删除选中单位','info');
+      }
+    }
     if (ev.code==='Space') { ev.preventDefault(); togglePause(); }
     if (ev.code==='KeyH'&&!ev.ctrlKey) { ev.preventDefault(); showHelp(); }
     if (ev.code==='KeyS'&&!ev.ctrlKey&&selectedUnits.length>0) { ev.preventDefault(); commandStop(); }
@@ -2685,8 +2728,8 @@ function setupInput() {
     if (ev.code==='Home'||ev.code==='Numpad5') {
       var base = gameState.entities.find(function(e){return e.team===TEAM_PLAYER&&e.type==='base';});
       if (base) {
-        camera.x = base.x*TILE_SIZE-(canvas.width-300)/2;
-        camera.y = base.y*TILE_SIZE-canvas.height/2;
+        camera.x = base.x*TILE_SIZE*camera.zoom-(canvas.width-300)/2;
+        camera.y = base.y*TILE_SIZE*camera.zoom-canvas.height/2;
         camera.x = Math.max(0,camera.x); camera.y = Math.max(0,camera.y);
       }
     }
@@ -2704,6 +2747,8 @@ function setupInput() {
       var idx = tabs.indexOf(currentTab);
       switchTab(tabs[(idx+1)%tabs.length]);
     }
+    if (ev.code==='F5') { ev.preventDefault(); saveGame(); }
+    if (ev.code==='F9') { ev.preventDefault(); loadGame(); }
   });
 
   document.addEventListener('keyup',function(ev){
@@ -2712,14 +2757,22 @@ function setupInput() {
 
   canvas.addEventListener('wheel',function(ev){
     ev.preventDefault();
-    // Camera scroll with wheel
-    if (ev.shiftKey) {
+    if (ev.ctrlKey || ev.metaKey) {
+      var oldZoom = camera.zoom;
+      if (ev.deltaY < 0) camera.zoom = Math.min(2.0, camera.zoom + 0.1);
+      else camera.zoom = Math.max(0.5, camera.zoom - 0.1);
+      var zoomRatio = camera.zoom / oldZoom;
+      var viewW = canvas.width - 300;
+      var cx = mouse.x + camera.x / oldZoom;
+      camera.x = camera.x * zoomRatio + (mouse.x - viewW/2) * (1 - zoomRatio);
+      camera.y = camera.y * zoomRatio + (mouse.y - canvas.height/2) * (1 - zoomRatio);
+    } else if (ev.shiftKey) {
       camera.x += ev.deltaY*0.5;
     } else {
       camera.y += ev.deltaY*0.5;
     }
-    var maxX = MAP_WIDTH*TILE_SIZE-(canvas.width-300);
-    var maxY = MAP_HEIGHT*TILE_SIZE-canvas.height;
+    var maxX = MAP_WIDTH*TILE_SIZE*camera.zoom-(canvas.width-300);
+    var maxY = MAP_HEIGHT*TILE_SIZE*camera.zoom-canvas.height;
     camera.x = Math.max(0,Math.min(maxX,camera.x));
     camera.y = Math.max(0,Math.min(maxY,camera.y));
   },{passive:false});
@@ -2743,10 +2796,10 @@ function setupInput() {
         u.pathIndex = 0;
       });
     } else {
-      camera.x = Math.floor(mx/sxR*TILE_SIZE-(canvas.width-300)/2);
-      camera.y = Math.floor(my/syR*TILE_SIZE-canvas.height/2);
-      camera.x = Math.max(0,Math.min(MAP_WIDTH*TILE_SIZE-(canvas.width-300),camera.x));
-      camera.y = Math.max(0,Math.min(MAP_HEIGHT*TILE_SIZE-canvas.height,camera.y));
+      camera.x = Math.floor(mx/sxR*TILE_SIZE*camera.zoom-(canvas.width-300)/2);
+      camera.y = Math.floor(my/syR*TILE_SIZE*camera.zoom-canvas.height/2);
+      camera.x = Math.max(0,Math.min(MAP_WIDTH*TILE_SIZE*camera.zoom-(canvas.width-300),camera.x));
+      camera.y = Math.max(0,Math.min(MAP_HEIGHT*TILE_SIZE*camera.zoom-canvas.height,camera.y));
     }
   });
   minimapCanvas.addEventListener('contextmenu',function(ev){ev.preventDefault();});
@@ -2761,3 +2814,165 @@ function setupInput() {
   });
 }
 var pendingAttackMove = false;
+
+// ===================== SAVE / LOAD =====================
+function saveGame() {
+  if (!gameState || !gameRunning) { notify('无法存档：游戏未运行','warn'); return; }
+  try {
+    var entityData = gameState.entities.filter(function(e){return !e.dead;}).map(function(e){
+      var obj = {};
+      var keys = ['id','type','team','x','y','hp','maxHp','size','name','isBuilding','category',
+        'damage','range','fireRate','fireCooldown','speed','type2','antiArmor','canRepair',
+        'canCapture','splashRadius','burstCount','burstRemaining','direction','turretDir',
+        'animFrame','built','buildProgress','buildTime','producing','produceProgress',
+        'ore','capacity','harvestTarget','returningToRefinery','rallyPoint','selected',
+        'attackMoveTarget','guardPos','power','powerUse','requires','cost','icon','desc',
+        'veterancy','kills','productionQueue'];
+      for (var i=0;i<keys.length;i++) {
+        var k = keys[i];
+        if (e[k] !== undefined) {
+          if (k === 'harvestTarget' && e[k]) obj[k] = {x:e[k].x, y:e[k].y};
+          else if (k === 'rallyPoint' && e[k]) obj[k] = {x:e[k].x, y:e[k].y};
+          else if (k === 'attackMoveTarget' && e[k]) obj[k] = {x:e[k].x, y:e[k].y};
+          else if (k === 'guardPos' && e[k]) obj[k] = {x:e[k].x, y:e[k].y};
+          else if (k === 'requires') obj[k] = e[k].slice();
+          else if (k === 'productionQueue') obj[k] = e[k].slice();
+          else if (k === 'attackTarget' && e[k]) obj[k] = e[k].id;
+          else if (k === 'burstTarget' && e[k]) obj[k] = e[k].id;
+          else obj[k] = e[k];
+        }
+      }
+      return obj;
+    });
+    var mapData = {
+      terrain: gameState.map.terrain,
+      oreAmount: gameState.map.oreAmount
+    };
+    var saveObj = {
+      entities: entityData,
+      map: mapData,
+      playerCredits: gameState.playerCredits,
+      enemyCredits: gameState.enemyCredits,
+      playerPower: gameState.playerPower,
+      playerPowerUse: gameState.playerPowerUse,
+      enemyPower: gameState.enemyPower,
+      enemyPowerUse: gameState.enemyPowerUse,
+      playerUnitCount: gameState.playerUnitCount,
+      playerUnitMax: gameState.playerUnitMax,
+      hasRadar: gameState.hasRadar,
+      hasTechCenter: gameState.hasTechCenter,
+      controlGroups: gameState.controlGroups,
+      stats: gameState.stats,
+      camera: {x:camera.x, y:camera.y, zoom:camera.zoom},
+      difficulty: difficulty,
+      frameCount: frameCount,
+      enemyAttackWave: enemyAttackWave,
+      version: 1
+    };
+    localStorage.setItem('redAlertSave', JSON.stringify(saveObj));
+    notify('游戏已存档','info');
+    playBuildSound();
+  } catch(e) {
+    notify('存档失败: '+e.message,'danger');
+  }
+}
+
+function loadGame() {
+  try {
+    var data = localStorage.getItem('redAlertSave');
+    if (!data) { notify('没有存档','warn'); return; }
+    var save = JSON.parse(data);
+    if (!save || !save.entities || !save.map) { notify('存档数据损坏','warn'); return; }
+
+    canvas = document.getElementById('gameCanvas');
+    ctx = canvas.getContext('2d');
+    minimapCanvas = document.getElementById('minimapCanvas');
+    minimapCtx = minimapCanvas.getContext('2d');
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+    minimapCanvas.width = 300; minimapCanvas.height = 200;
+
+    Entity.counter = 0;
+    gameState = new GameState();
+    gameState.map.terrain = save.map.terrain;
+    gameState.map.oreAmount = save.map.oreAmount;
+    gameState.map.occupancy = [];
+    for (var i=0;i<MAP_HEIGHT;i++) {
+      gameState.map.occupancy[i] = [];
+      for (var j=0;j<MAP_WIDTH;j++) gameState.map.occupancy[i][j] = null;
+    }
+
+    gameState.playerCredits = save.playerCredits;
+    gameState.enemyCredits = save.enemyCredits;
+    gameState.playerPower = save.playerPower;
+    gameState.playerPowerUse = save.playerPowerUse;
+    gameState.enemyPower = save.enemyPower;
+    gameState.enemyPowerUse = save.enemyPowerUse;
+    gameState.playerUnitCount = save.playerUnitCount;
+    gameState.playerUnitMax = save.playerUnitMax;
+    gameState.hasRadar = save.hasRadar;
+    gameState.hasTechCenter = save.hasTechCenter;
+    gameState.controlGroups = save.controlGroups || {};
+    gameState.stats = save.stats || gameState.stats;
+
+    var entityMap = {};
+    gameState.entities = [];
+    for (var ei=0;ei<save.entities.length;ei++) {
+      var ed = save.entities[ei];
+      var e = new Entity(ed.type, ed.team, ed.x, ed.y);
+      var ekeys = ['hp','maxHp','size','name','isBuilding','category','damage','range',
+        'fireRate','fireCooldown','speed','type2','antiArmor','canRepair','canCapture',
+        'splashRadius','burstCount','burstRemaining','direction','turretDir','animFrame',
+        'built','buildProgress','buildTime','producing','produceProgress','ore','capacity',
+        'returningToRefinery','selected','power','powerUse','cost','icon','desc',
+        'veterancy','kills'];
+      for (var ki=0;ki<ekeys.length;ki++) {
+        if (ed[ekeys[ki]] !== undefined) e[ekeys[ki]] = ed[ekeys[ki]];
+      }
+      e.id = ed.id;
+      if (ed.harvestTarget) e.harvestTarget = ed.harvestTarget;
+      if (ed.rallyPoint) e.rallyPoint = ed.rallyPoint;
+      if (ed.attackMoveTarget) e.attackMoveTarget = ed.attackMoveTarget;
+      if (ed.guardPos) e.guardPos = ed.guardPos;
+      if (ed.requires) e.requires = ed.requires;
+      if (ed.productionQueue) e.productionQueue = ed.productionQueue;
+      e.path = []; e.pathIndex = 0; e.pathRecalcTimer = 0;
+      e.dead = false; e.deathTimer = 45;
+      e.flashTimer = 0; e.lastDamagedBy = null; e.lastDamagedTimer = 0;
+      e.muzzleFlash = 0; e.burstTarget = null;
+      if (ed.id > Entity.counter) Entity.counter = ed.id;
+      entityMap[ed.id] = e;
+      gameState.entities.push(e);
+      if (e.isBuilding && e.built) gameState.map.setOccupancy(e);
+    }
+    for (var ai=0;ai<gameState.entities.length;ai++) {
+      var ae = gameState.entities[ai];
+      var aed = save.entities[ai];
+      if (aed.attackTarget && entityMap[aed.attackTarget]) ae.attackTarget = entityMap[aed.attackTarget];
+      if (aed.burstTarget && entityMap[aed.burstTarget]) ae.burstTarget = entityMap[aed.burstTarget];
+    }
+
+    camera.x = save.camera.x; camera.y = save.camera.y; camera.zoom = save.camera.zoom || 1;
+    difficulty = save.difficulty;
+    frameCount = save.frameCount;
+    enemyAttackWave = save.enemyAttackWave || 0;
+    gameStartTime = Date.now() - frameCount * (1000/60);
+    selectedUnits = []; selectedBuilding = null;
+    placingBuilding = false; placingType = null;
+    enemyAITimer = 0; enemyBuildQueue = []; enemyAttackTimer = 0;
+    enemyScoutTimer = 0; notifTimer = 0; currentTab = 'buildings';
+    gameRunning = true; gamePaused = false; gameSpeed = 1;
+    dragSelect = {active:false,startX:0,startY:0,endX:0,endY:0};
+    activeAction = null; pendingAttackMove = false;
+
+    document.getElementById('startScreen').style.display = 'none';
+    document.getElementById('gameOver').style.display = 'none';
+    renderGroupBar();
+    setupInput();
+    updateBuildList();
+    notify('游戏已读档','info');
+    playBuildSound();
+    gameLoop();
+  } catch(e) {
+    notify('读档失败: '+e.message,'danger');
+  }
+}

@@ -16,10 +16,12 @@ export class EnemyAI {
   }
 
   update(gameState, difficulty, frameCount) {
-    var diffMult = 1, buildInterval = 180, attackInterval = 1200;
-    if (difficulty === 'normal') { diffMult = 1.3; buildInterval = 120; attackInterval = 900; }
-    else if (difficulty === 'hard') { diffMult = 2.2; buildInterval = 65; attackInterval = 550; }
-    if (frameCount % 30 === 0) gameState.enemyCredits += Math.floor((25 + this.attackWave * 8) * diffMult);
+    // 极度降低难度：AI几乎不发展，攻击极弱
+    var diffMult = 0.15, buildInterval = 800, attackInterval = 5000;
+    if (difficulty === 'normal') { diffMult = 0.3; buildInterval = 600; attackInterval = 4000; }
+    else if (difficulty === 'hard') { diffMult = 0.8; buildInterval = 300; attackInterval = 2000; }
+    // AI资源获取极慢
+    if (frameCount % 60 === 0) gameState.enemyCredits += Math.floor((5 + this.attackWave) * diffMult);
     this.aiTimer++;
     if (this.aiTimer >= buildInterval) {
       this.aiTimer = 0;
@@ -46,6 +48,7 @@ export class EnemyAI {
         }
       }
     }
+    if (frameCount % 300 === 0) this.superWeaponPhase(gameState);
     if (this._callbacks && this._callbacks.updateUnitAI) {
       var eu = gameState.getEnemyUnits();
       for (var i = 0; i < eu.length; i++) {
@@ -77,7 +80,11 @@ export class EnemyAI {
     if (!gameState.hasBuilding(TEAM_ENEMY, 'barracks') && gameState.hasBuilding(TEAM_ENEMY, 'powerPlant') && gameState.enemyCredits >= 400 && !qHas('barracks')) this.buildQueue.push('barracks');
     if (!gameState.hasBuilding(TEAM_ENEMY, 'warFactory') && gameState.hasBuilding(TEAM_ENEMY, 'barracks') && gameState.enemyCredits >= 700 && !qHas('warFactory')) this.buildQueue.push('warFactory');
     if (!gameState.hasBuilding(TEAM_ENEMY, 'radar') && gameState.hasBuilding(TEAM_ENEMY, 'powerPlant') && gameState.enemyCredits >= 600 && !qHas('radar')) this.buildQueue.push('radar');
-    if (!gameState.hasBuilding(TEAM_ENEMY, 'techCenter') && gameState.hasBuilding(TEAM_ENEMY, 'radar') && gameState.hasBuilding(TEAM_ENEMY, 'warFactory') && gameState.enemyCredits >= 1200 && !qHas('techCenter')) this.buildQueue.push('techCenter');
+    // 苏联科技中心
+    if (!gameState.hasBuilding(TEAM_ENEMY, 'sovietTech') && gameState.hasBuilding(TEAM_ENEMY, 'radar') && gameState.hasBuilding(TEAM_ENEMY, 'warFactory') && gameState.enemyCredits >= 1200 && !qHas('sovietTech')) this.buildQueue.push('sovietTech');
+    // 超级武器（简单难度不造）
+    if (difficulty !== 'easy' && gameState.hasBuilding(TEAM_ENEMY, 'sovietTech') && !gameState.hasBuilding(TEAM_ENEMY, 'nukeSilo') && gameState.enemyCredits >= 3000 && !qHas('nukeSilo')) this.buildQueue.push('nukeSilo');
+    if (difficulty === 'hard' && gameState.hasBuilding(TEAM_ENEMY, 'sovietTech') && !gameState.hasBuilding(TEAM_ENEMY, 'ironCurtain') && gameState.enemyCredits >= 2500 && !qHas('ironCurtain')) this.buildQueue.push('ironCurtain');
     var surplus = gameState.enemyPower - gameState.enemyPowerUse;
     if (surplus < 30 && gameState.enemyCredits >= 300 && !qHas('powerPlant')) this.buildQueue.push('powerPlant');
     if (difficulty === 'hard' && gameState.hasBuilding(TEAM_ENEMY, 'refinery')) {
@@ -87,37 +94,58 @@ export class EnemyAI {
   }
 
   productionPhase(gameState, difficulty) {
+    // 降低难度：减少采矿车数量
     var harvCount = gameState.getEnemyUnits().filter(function(u) { return u.type2 === 'harvester'; }).length;
-    var targetHarv = difficulty === 'hard' ? 4 : (difficulty === 'normal' ? 3 : 2);
-    if (harvCount < targetHarv && gameState.hasBuilding(TEAM_ENEMY, 'refinery') && gameState.enemyCredits >= 600) {
+    var targetHarv = difficulty === 'hard' ? 3 : (difficulty === 'normal' ? 2 : 1);
+    // 苏联用武装采矿车（warMiner），原先造的是盟军的超时空采矿车，且扣费写死 600 与造价 1400 不符
+    var harvType = 'warMiner';
+    var harvDef = UNIT_DEFS[harvType];
+    if (harvCount < targetHarv && gameState.hasBuilding(TEAM_ENEMY, 'refinery') && gameState.enemyCredits >= harvDef.cost) {
       var refB = this.findBuilding('refinery', TEAM_ENEMY, gameState.entities);
-      if (refB && !refB.producing) { gameState.enemyCredits -= 600; refB.producing = 'harvester'; refB.produceProgress = 0; }
+      if (refB && !refB.producing) { gameState.enemyCredits -= harvDef.cost; refB.producing = harvType; refB.produceProgress = 0; }
     }
+    
+    // 降低难度：减少步兵生产频率
     var iBar = this.findBuilding('barracks', TEAM_ENEMY, gameState.entities);
-    if (iBar && !iBar.producing && gameState.enemyCredits >= 100) {
+    if (iBar && !iBar.producing && gameState.enemyCredits >= 80 && Math.random() > 0.4) {
       var roll = Math.random();
       var uc2;
-      if (gameState.enemyCredits >= 300 && roll > 0.85) uc2 = 'engineer';
-      else if (gameState.enemyCredits >= 200 && roll > 0.55) uc2 = 'rocket';
-      else uc2 = 'infantry';
-      if (UNIT_DEFS[uc2].cost <= gameState.enemyCredits) { gameState.enemyCredits -= UNIT_DEFS[uc2].cost; iBar.producing = uc2; iBar.produceProgress = 0; }
+      // 苏联步兵选择 - 更多动员兵，更少高级单位
+      if (gameState.enemyCredits >= 300 && roll > 0.92) uc2 = 'engineer';
+      else if (gameState.enemyCredits >= 200 && roll > 0.75) uc2 = 'flakTrooper'; // 防空步兵
+      else uc2 = 'conscript'; // 动员兵
+      
+      if (UNIT_DEFS[uc2] && UNIT_DEFS[uc2].cost <= gameState.enemyCredits) { 
+        gameState.enemyCredits -= UNIT_DEFS[uc2].cost; 
+        iBar.producing = uc2; 
+        iBar.produceProgress = 0; 
+      }
     }
+    
+    // 降低难度：减少坦克生产频率和高级单位概率
     var wfB = this.findBuilding('warFactory', TEAM_ENEMY, gameState.entities);
-    if (wfB && !wfB.producing && gameState.enemyCredits >= 500) {
-      var vc = 'tank', vRoll = Math.random();
-      if (gameState.hasBuilding(TEAM_ENEMY, 'techCenter') && gameState.enemyCredits >= 1100 && vRoll > 0.75) vc = 'mlrs';
-      else if (gameState.hasBuilding(TEAM_ENEMY, 'techCenter') && gameState.enemyCredits >= 900 && vRoll > 0.45) vc = 'heavyTank';
-      else if (gameState.enemyCredits >= 700 && vRoll > 0.6) vc = 'arty';
-      else if (gameState.enemyCredits >= 500 && vRoll > 0.4) vc = 'apc';
-      if (UNIT_DEFS[vc].cost <= gameState.enemyCredits) { gameState.enemyCredits -= UNIT_DEFS[vc].cost; wfB.producing = vc; wfB.produceProgress = 0; }
+    if (wfB && !wfB.producing && gameState.enemyCredits >= 500 && Math.random() > 0.3) {
+      // 苏联阵营单位选择 - 降低高级单位概率
+      var vc = 'rhino', vRoll = Math.random(); // 默认犀牛坦克
+      if (gameState.hasBuilding(TEAM_ENEMY, 'sovietTech') && gameState.enemyCredits >= 1750 && vRoll > 0.92) vc = 'apocalypse'; // 天启
+      else if (gameState.hasBuilding(TEAM_ENEMY, 'sovietTech') && gameState.enemyCredits >= 800 && vRoll > 0.75) vc = 'v3'; // V3火箭
+      else if (gameState.enemyCredits >= 600 && vRoll > 0.65) vc = 'flakTrack'; // 防空履带车
+      
+      // 检查单位定义是否存在
+      if (UNIT_DEFS[vc] && UNIT_DEFS[vc].cost <= gameState.enemyCredits) { 
+        gameState.enemyCredits -= UNIT_DEFS[vc].cost; 
+        wfB.producing = vc; 
+        wfB.produceProgress = 0; 
+      }
     }
   }
 
   defensePhase(gameState, difficulty) {
-    if (Math.random() > 0.5 && gameState.enemyCredits >= 300) {
+    // 降低难度：减少防御建筑建造频率
+    if (Math.random() > 0.7 && gameState.enemyCredits >= 300) {
       var dc = 'pillbox', dRoll = Math.random();
-      if (gameState.hasBuilding(TEAM_ENEMY, 'techCenter') && gameState.enemyCredits >= 1500 && dRoll > 0.8) dc = 'tesla';
-      else if (gameState.hasBuilding(TEAM_ENEMY, 'warFactory') && gameState.enemyCredits >= 600 && dRoll > 0.4) dc = 'turret';
+      if (gameState.hasBuilding(TEAM_ENEMY, 'sovietTech') && gameState.enemyCredits >= 1200 && dRoll > 0.9) dc = 'tesla';
+      else if (gameState.hasBuilding(TEAM_ENEMY, 'warFactory') && gameState.enemyCredits >= 600 && dRoll > 0.6) dc = 'turret';
       var dpos = this.findBuildPosition(dc, TEAM_ENEMY, gameState);
       if (dpos && gameState.canBuild(dc, TEAM_ENEMY)) {
         gameState.enemyCredits -= DEFENSE_DEFS[dc].cost;
@@ -129,8 +157,10 @@ export class EnemyAI {
 
   launchAttack(gameState) {
     var idle = gameState.getEnemyUnits().filter(function(u) { return u.type2 !== 'harvester' && !u.attackTarget && !u.attackMoveTarget; });
-    if (idle.length < 3) return;
-    var force = Math.min(idle.length, Math.floor(3 + this.attackWave * 1.5));
+    // 极度降低难度：需要极多单位才会攻击，攻击规模极小
+    if (idle.length < 12) return;
+    // 攻击规模极小，几乎不增长
+    var force = Math.min(idle.length, Math.floor(1 + this.attackWave * 0.3));
     var atk = idle.slice(0, force);
     var pBs = gameState.getPlayerBuildings();
     if (pBs.length === 0) return;
@@ -149,6 +179,37 @@ export class EnemyAI {
       if (this._callbacks && this._callbacks.playAlertSound) this._callbacks.playAlertSound();
       gameState.underAttackAlertCooldown = 300;
     }
+  }
+
+  superWeaponPhase(gameState) {
+    var swm = gameState.superWeaponManager;
+    if (!swm || swm.enemySuperWeapons.size === 0) return;
+    swm.enemySuperWeapons.forEach(function(weapon, type) {
+      if (!weapon.ready) return;
+      if (type === 'nuke' || type === 'lightningStorm') {
+        var pBs = gameState.getPlayerBuildings();
+        if (pBs.length === 0) return;
+        var tgt = pBs[Math.floor(Math.random() * pBs.length)];
+        swm.useSuperWeapon(type, TEAM_ENEMY, Math.floor(tgt.x), Math.floor(tgt.y));
+      } else if (type === 'ironCurtain') {
+        var units = gameState.getEnemyUnits().filter(function(u) { return u.type2 !== 'harvester'; });
+        if (units.length < 3) return;
+        var cx = 0, cy = 0;
+        for (var i = 0; i < units.length; i++) { cx += units[i].x; cy += units[i].y; }
+        swm.useSuperWeapon(type, TEAM_ENEMY, Math.floor(cx / units.length), Math.floor(cy / units.length));
+      } else if (type === 'chrono') {
+        var movers = gameState.getEnemyUnits().filter(function(u) { return u.type2 !== 'harvester' && !u.attackTarget; });
+        var pBs2 = gameState.getPlayerBuildings();
+        if (movers.length < 4 || pBs2.length === 0) return;
+        var cx2 = 0, cy2 = 0;
+        for (var j = 0; j < movers.length; j++) { cx2 += movers[j].x; cy2 += movers[j].y; }
+        if (swm.useSuperWeapon(type, TEAM_ENEMY, Math.floor(cx2 / movers.length), Math.floor(cy2 / movers.length))) {
+          var pending = swm.getPendingChrono(TEAM_ENEMY);
+          var dest = pBs2[Math.floor(Math.random() * pBs2.length)];
+          if (pending) swm.completeChronoShift(pending, Math.floor(dest.x), Math.floor(dest.y));
+        }
+      }
+    });
   }
 
   findBuilding(type, team, entities) {

@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RED ALERT · 红色警戒 网页版</title>
+<title>红警网页复刻版</title>
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
 <div id="startScreen">
   <h1>RED ALERT</h1>
-  <h2>红色警戒 · 网页版</h2>
-  <p class="sub">即时战略 · 摧毁敌方建造厂以获得胜利</p>
+  <h2>红警网页复刻版</h2>
+  <p class="sub">即时战略 · 摧毁敌方建造厂以获得胜利 · 非官方复刻，与 EA 无关</p>
   <div class="mode-container">
     <div class="mode-card easy" onclick="startGame('easy')">
       <h3>简单</h3>
@@ -59,6 +59,7 @@
   <span id="gameTime">00:00</span>
   <button id="pauseBtn" onclick="togglePause()">暂停</button>
   <button id="speedBtn" onclick="cycleSpeed()">1×</button>
+  <button id="fullscreenBtn" onclick="toggleFullscreen()" title="全屏">⛶</button>
 </div>
 
 <div id="sidebar">
@@ -76,6 +77,10 @@
   </div>
   <div id="selectionInfo">
     <span class="info-hint">左键选择 · 右键移动/攻击 · 拖拽框选</span>
+  </div>
+  <div id="superWeaponPanel" class="hidden">
+    <div id="swHeader">SUPER WEAPONS</div>
+    <div id="swList"></div>
   </div>
   <div id="minimap">
     <canvas id="minimapCanvas"></canvas>

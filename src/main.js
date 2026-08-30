@@ -1,4 +1,4 @@
-import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, TEAM_PLAYER, TEAM_ENEMY, GRASS, WATER, ORE, SAND, CONCRETE } from './constants.js';
+import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, TEAM_PLAYER, TEAM_ENEMY, GRASS, WATER, ORE, SAND, CONCRETE, TREE } from './constants.js';
 import { BUILDING_DEFS, DEFENSE_DEFS, UNIT_DEFS } from './definitions.js';
 import { Entity } from './Entity.js';
 import { GameState } from './GameState.js';
@@ -60,9 +60,16 @@ function startGame(diff) {
     findProducingBuilding: findProducingBuilding,
     startBuild: startBuild,
     playSelectSound: function() { audioManager.playSelect(); },
+    playCancelSound: function() { audioManager.playCancel(); },
     findEntityById: findEntityById,
     onSelectGroup: selectGroup,
-    onNotify: notify
+    onNotify: notify,
+    onSuperWeaponClick: function(type) {
+      if (!input) return;
+      input._callbacks.superWeaponTargeting = type;
+      notify('点击地图选择目标位置，右键取消', 'info');
+      audioManager.playSelect();
+    }
   });
   input = new InputHandler(canvas, minimapCanvas);
   input.setup(gameState, camera, {
@@ -89,7 +96,9 @@ function startGame(diff) {
       ui.switchTab(tabs[(idx + 1) % tabs.length]);
     },
     onSaveGame: saveGame,
-    onLoadGame: loadGame
+    onLoadGame: loadGame,
+    superWeaponTargeting: null,
+    onSuperWeaponFire: fireSuperWeapon
   });
   enemyAI = new EnemyAI();
   enemyAI.init({
@@ -98,9 +107,39 @@ function startGame(diff) {
     playAlertSound: function() { audioManager.playAlert(); }
   });
   saveManager = new SaveManager();
+  wireSuperWeaponCallbacks(gameState.superWeaponManager);
+  // 调试/测试钩子
+  window.__game = gameState;
+  window.__input = input;
   ui.renderGroupBar(gameState);
   ui.updateBuildList(gameState);
   gameLoop();
+}
+
+function wireSuperWeaponCallbacks(swm) {
+  swm.onLaunch = function(type, team) {
+    if (type === 'nuke') audioManager.playNukeSiren();
+    else if (type === 'chrono') audioManager.playChrono();
+    else if (type === 'ironCurtain') audioManager.playIronCurtain();
+    else if (type === 'lightningStorm') audioManager.playAlert();
+    if (team === TEAM_ENEMY) {
+      var swNames = { nuke: '核弹攻击', lightningStorm: '闪电风暴', ironCurtain: '铁幕装置', chrono: '超时空传送' };
+      notify('警报: 敌方使用了 ' + (swNames[type] || '超级武器') + '！', 'danger');
+      audioManager.playAlert();
+    }
+  };
+  swm.onChronoPending = function(team) {
+    if (team === TEAM_PLAYER && input) {
+      input._callbacks.superWeaponTargeting = '__chronoDest';
+      notify('选择传送目的地', 'info');
+    }
+  };
+  swm.onChronoExpired = function(team) {
+    if (team === TEAM_PLAYER && input && input._callbacks.superWeaponTargeting === '__chronoDest') {
+      input._callbacks.superWeaponTargeting = null;
+      notify('传送超时取消', 'warn');
+    }
+  };
 }
 
 function gameLoop() {
@@ -126,6 +165,7 @@ function gameLoop() {
   }
   ui.updateUI(gameState, gameStartTime, input ? input._callbacks.selectedUnits : selectedUnits,
     input ? input._callbacks.selectedBuilding : selectedBuilding, frameCount);
+  ui.updateSuperWeapons(gameState, input ? input._callbacks.superWeaponTargeting : null, frameCount);
   renderer.render(gameState, camera, frameCount,
     input ? input._callbacks.selectedUnits : selectedUnits,
     input ? input._callbacks.selectedBuilding : selectedBuilding,
@@ -134,6 +174,7 @@ function gameLoop() {
     input ? input.mouse : { x: 0, y: 0, worldX: 0, worldY: 0, mapX: 0, mapY: 0, inCanvas: false },
     input ? input.dragSelect : { active: false, startX: 0, startY: 0, endX: 0, endY: 0 },
     input ? input._callbacks.activeAction : activeAction,
+    input ? input._callbacks.superWeaponTargeting : null,
     gamePaused, canvas.width - 300, canvas.height);
   requestAnimationFrame(gameLoop);
 }
@@ -162,8 +203,21 @@ function updateCamera() {
 }
 
 function updateEntities() {
-  gameState.spatialDirty = true;
+  // 空间网格每3帧重建一次即可，范围查询不需要每帧精确
+  if (frameCount % 3 === 0) gameState.spatialDirty = true;
   gameState._listDirty = false;
+  // 重置本帧寻路预算：大量单位同帧重算路径时压缩单次迭代上限，平滑掉帧尖峰
+  gameState.map.resetPathBudget();
+  
+  // 更新战争迷雾
+  if (gameState.fogOfWar && frameCount % 5 === 0) {
+    gameState.fogOfWar.update(gameState.entities);
+  }
+  
+  // 更新超级武器
+  if (gameState.superWeaponManager) {
+    gameState.superWeaponManager.update();
+  }
   for (var i = gameState.entities.length - 1; i >= 0; i--) {
     var e = gameState.entities[i];
     if (e.dead) {
@@ -190,18 +244,21 @@ function updateEntities() {
 }
 
 function updateRepairBays() {
-  if (frameCount % 12 !== 0) return;
+  if (frameCount % 6 !== 0) return;
   var bays = gameState.entities.filter(function(e) { return e.type === 'repairBay' && e.built && !e.dead; });
+  if (bays.length === 0) return;
   for (var b = 0; b < bays.length; b++) {
     var bay = bays[b];
     for (var i = 0; i < gameState.entities.length; i++) {
       var e = gameState.entities[i];
-      if (e.team === bay.team && !e.isBuilding && !e.dead && e.type2 === 'vehicle' && e.hp < e.maxHp) {
-        var d = Math.hypot(e.x - bay.x - bay.size / 2, e.y - bay.y - bay.size / 2);
-        if (d < 4) {
-          e.hp = Math.min(e.maxHp, e.hp + 3);
-          if (frameCount % 60 === 0) gameState.addFloatingText(e.getCenterX(), e.getCenterY() - 12, '+', '#2ecc71');
-        }
+      if (e.team !== bay.team || e.isBuilding || e.dead) continue;
+      // 红警2 的维修站只修地面车辆，步兵与飞机不在服务范围内
+      if (e.type2 !== 'vehicle' || e.hp >= e.maxHp) continue;
+      var d = Math.hypot(e.x - bay.x - bay.size / 2, e.y - bay.y - bay.size / 2);
+      if (d > REPAIR_BAY_RANGE) continue;
+      e.hp = Math.min(e.maxHp, e.hp + REPAIR_BAY_HEAL);
+      if (frameCount % 24 === 0) {
+        gameState.addFloatingText(e.getCenterX(), e.getCenterY() - 12, '+' + REPAIR_BAY_HEAL, '#2ecc71');
       }
     }
   }
@@ -219,31 +276,53 @@ function updateBuildingAI(e) {
   }
   if (DEFENSE_DEFS[e.type] && e.damage > 0) {
     if (e.fireCooldown > 0) e.fireCooldown--;
-    if (e.fireCooldown <= 0) {
+    // 瞄准与开火共用一次邻域查询；按 canAttack 过滤（对空/弹药等）
+    if (e.fireCooldown <= 0 || frameCount % 6 === 0) {
+      var dd = DEFENSE_DEFS[e.type];
       var enemies = gameState.getEnemiesInRange(e, e.range);
-      if (enemies.length > 0) {
-        var tgt = enemies[0], bd = Infinity;
-        for (var ei = 0; ei < enemies.length; ei++) {
-          var d = Math.hypot(enemies[ei].x - e.x, enemies[ei].y - e.y);
-          if (d < bd) { bd = d; tgt = enemies[ei]; }
+      var tgt = null, bd = Infinity;
+      for (var ei = 0; ei < enemies.length; ei++) {
+        var cand = enemies[ei];
+        if (!e.canAttack(cand)) continue;
+        // 防空专用建筑只打空中目标
+        if (dd.antiAir && !cand.isAirUnit) continue;
+        var d = Math.hypot(cand.x - e.x, cand.y - e.y);
+        if (d < bd) { bd = d; tgt = cand; }
+      }
+      if (tgt) {
+        // 磁暴线圈耗电极大：基地电力不足时无法开火（红警2 设定）
+        var powered = true;
+        if (e.type === 'tesla') {
+          powered = e.team === TEAM_PLAYER
+            ? (gameState.playerPower >= gameState.playerPowerUse)
+            : (gameState.enemyPower >= gameState.enemyPowerUse);
         }
-        performAttack(e, tgt);
+        if (powered) {
+          e.renderTurretAngle = Math.atan2(tgt.getCenterY() / TILE_SIZE - e.y - e.size / 2,
+                                           tgt.getCenterX() / TILE_SIZE - e.x - e.size / 2);
+          if (e.fireCooldown <= 0) performAttack(e, tgt);
+        }
       }
     }
   }
   if (e.producing) {
     var pd = UNIT_DEFS[e.producing];
     if (pd) {
-      e.produceProgress += 100 / (pd.buildTime * 60);
-      if (e.produceProgress >= 100) {
-        spawnProducedUnit(e);
-        if (e.team === TEAM_PLAYER) { notify(pd.name + ' \u8bad\u7ec3\u5b8c\u6210', 'info'); audioManager.playReady(); }
-        e.producing = null;
-        e.produceProgress = 0;
-        if (e.productionQueue.length > 0) {
-          var next = e.productionQueue.shift();
-          var nextDef = UNIT_DEFS[next];
-          if (nextDef) { e.producing = next; e.produceProgress = 0; }
+      // 人口已满时暂停生产而不是硬造出来撑爆上限（红警2 行为）
+      if (e.team === TEAM_PLAYER && gameState.playerUnitCount >= gameState.playerUnitMax) {
+        if (frameCount % 300 === 0) notify('\u4eba\u53e3\u5df2\u6ee1\uff0c\u751f\u4ea7\u6682\u505c\u4e2d', 'warn');
+      } else {
+        e.produceProgress += 100 / (pd.buildTime * 60);
+        if (e.produceProgress >= 100) {
+          spawnProducedUnit(e);
+          if (e.team === TEAM_PLAYER) { notify(pd.name + ' \u8bad\u7ec3\u5b8c\u6210', 'info'); audioManager.playReady(); }
+          e.producing = null;
+          e.produceProgress = 0;
+          if (e.productionQueue.length > 0) {
+            var next = e.productionQueue.shift();
+            var nextDef = UNIT_DEFS[next];
+            if (nextDef) { e.producing = next; e.produceProgress = 0; }
+          }
         }
       }
     }
@@ -252,30 +331,81 @@ function updateBuildingAI(e) {
 
 function spawnProducedUnit(building) {
   var type = building.producing;
-  var tries = [];
-  for (var dy = -1; dy <= building.size; dy++) for (var dx = -1; dx <= building.size; dx++) {
-    if (dx === -1 || dx === building.size || dy === -1 || dy === building.size)
-      tries.push({ x: Math.floor(building.x) + dx, y: Math.floor(building.y) + dy });
+  var bx = Math.floor(building.x), by = Math.floor(building.y), size = building.size;
+  var cx = bx + size / 2, cy = by + size / 2;
+
+  // 在建筑外圈 2 格内找最近的可通行落点。原先只扫紧贴的一圈，找不到时回退到
+  // 建筑自身的格子，工厂被围死时新单位会卡死在建筑里，表现为「造不出兵」
+  var best = null, bestD = Infinity;
+  for (var dy = -2; dy < size + 2; dy++) {
+    for (var dx = -2; dx < size + 2; dx++) {
+      if (dx >= 0 && dx < size && dy >= 0 && dy < size) continue; // 跳过建筑自身占地
+      var px = bx + dx, py = by + dy;
+      if (px < 0 || px >= MAP_WIDTH || py < 0 || py >= MAP_HEIGHT) continue;
+      if (!gameState.map.isPassable(px, py)) continue;
+      var d = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+      if (d < bestD) { bestD = d; best = { x: px, y: py }; }
+    }
   }
-  var sx = Math.floor(building.x) + building.size, sy = Math.floor(building.y);
-  for (var t = 0; t < tries.length; t++) {
-    if (gameState.map.isPassable(tries[t].x, tries[t].y)) { sx = tries[t].x; sy = tries[t].y; break; }
-  }
-  sx = Math.max(0, Math.min(MAP_WIDTH - 1, sx));
-  sy = Math.max(0, Math.min(MAP_HEIGHT - 1, sy));
+  var sx = best ? best.x : Math.max(0, Math.min(MAP_WIDTH - 1, bx + size));
+  var sy = best ? best.y : Math.max(0, Math.min(MAP_HEIGHT - 1, by));
+
   var nu = gameState.spawnEntity(type, building.team, sx, sy);
+
+  // 继承建筑的阵营
+  nu.faction = building.faction;
+
+  if (type === 'harvester' || type === 'warMiner') {
+    var ore = gameState.map.findNearestOre(sx, sy);
+    if (ore.x >= 0) { nu.harvestTarget = ore; nu.path = gameState.map.findPath(sx, sy, ore.x, ore.y); nu.pathIndex = 0; }
+    return;
+  }
+
+  // 战斗单位：前往集结点，抵达后自动转入守卫（红警2 行为）。
+  // 没有集结点时直接在出厂位置守卫，避免新兵站着挨打
   if (building.rallyPoint) {
     nu.path = gameState.map.findPath(sx, sy, building.rallyPoint.x, building.rallyPoint.y);
     nu.pathIndex = 0;
-  }
-  if (type === 'harvester') {
-    var ore = gameState.map.findNearestOre(sx, sy);
-    if (ore.x >= 0) { nu.harvestTarget = ore; nu.path = gameState.map.findPath(sx, sy, ore.x, ore.y); nu.pathIndex = 0; }
+    nu.autoGuard = true;
+  } else {
+    nu.guardPos = { x: sx, y: sy };
   }
 }
 
+function pickAttackTarget(unit, candidates) {
+  var best = null, bd = Infinity;
+  for (var i = 0; i < candidates.length; i++) {
+    var c = candidates[i];
+    if (!unit.canAttack(c)) continue;
+    var d = Math.hypot(c.x - unit.x, c.y - unit.y);
+    if (d < bd) { bd = d; best = c; }
+  }
+  return best;
+}
+
 function updateUnitAI(unit) {
+  if (unit.chronoStun > 0) return; // 超时空传送后的短暂眩晕
+  if (updateSpyInfiltration(unit)) return; // 间谍：触碰到敌方建筑即渗透并消失
   if (unit.type2 === 'harvester') { updateHarvesterAI(unit); return; }
+  // 空军：弹药耗尽自动返场（最近基地/矿厂）补充
+  if (unit.isAirUnit) {
+    if (unit.ammo !== null && unit.ammo <= 0) unit.returningToBase = true;
+    if (unit.returningToBase) {
+      var hq = gameState.map.findNearestRefinery(unit.x, unit.y, unit.team, gameState.getRefineries(unit.team));
+      if (!hq) { unit.returningToBase = false; return; }
+      var hqX = Math.floor(hq.x) + Math.floor(hq.size / 2);
+      var hqY = Math.floor(hq.y) + Math.floor(hq.size / 2);
+      if (Math.hypot(unit.x - hqX, unit.y - hqY) < 1.5) {
+        unit.reload();
+        unit.path = []; unit.pathIndex = 0;
+        return;
+      }
+      unit.path = [{ x: hqX, y: hqY }];
+      unit.pathIndex = 0;
+      moveUnit(unit);
+      return;
+    }
+  }
   if (unit.canRepair && unit.attackTarget && unit.attackTarget.isBuilding) {
     var tgt = unit.attackTarget;
     var d = Math.hypot(unit.x - (tgt.x + tgt.size / 2), unit.y - (tgt.y + tgt.size / 2));
@@ -288,6 +418,8 @@ function updateUnitAI(unit) {
         if (unit.team === TEAM_PLAYER) notify('\u5360\u9886\u4e86 ' + tgt.name + '\uff01', 'info');
         gameState.map.clearOccupancy(tgt);
         tgt.team = unit.team;
+        // 占领会改变建筑归属，精炼厂缓存需失效并重算
+        if (tgt.type === 'refinery' || tgt.type === 'base') gameState._refineryDirty = true;
         tgt.hp = Math.max(tgt.hp, tgt.maxHp * 0.5);
         gameState.map.setOccupancy(tgt);
         unit.dead = true;
@@ -318,8 +450,8 @@ function updateUnitAI(unit) {
   if (unit.attackTarget) {
     if (unit.attackTarget.dead) {
       if (unit.attackMoveTarget) {
-        var newT = gameState.getEnemiesInRange(unit, unit.range + 2);
-        if (newT.length > 0) unit.attackTarget = newT[0];
+        var newT = pickAttackTarget(unit, gameState.getEnemiesInRange(unit, unit.range + 2));
+        if (newT) unit.attackTarget = newT;
         else { unit.attackTarget = null; unit.path = []; unit.pathIndex = 0; }
       } else { unit.attackTarget = null; unit.path = []; unit.pathIndex = 0; }
       return;
@@ -331,10 +463,18 @@ function updateUnitAI(unit) {
       unit.path = [];
       unit.pathIndex = 0;
       unit.turretDir = Math.atan2(atY - unit.y - 0.5, atX - unit.x - 0.5);
-      if (unit.fireCooldown <= 0) performAttack(unit, unit.attackTarget);
+      if (unit.fireCooldown <= 0 && unit.canAttack(unit.attackTarget)) performAttack(unit, unit.attackTarget);
     } else {
+      // 追击途中若有别的敌人进入射程，边追边打，不必等原目标进入射程
+      if (unit.damage > 0 && unit.fireCooldown <= 0) {
+        var opp = pickAttackTarget(unit, gameState.getEnemiesInRange(unit, unit.range));
+        if (opp) {
+          unit.turretDir = Math.atan2(opp.getCenterY() - unit.getCenterY(), opp.getCenterX() - unit.getCenterX());
+          performAttack(unit, opp);
+        }
+      }
       if (unit.path.length === 0 || unit.pathIndex >= unit.path.length || unit.pathRecalcTimer <= 0) {
-        unit.path = gameState.map.findPath(Math.floor(unit.x), Math.floor(unit.y), Math.floor(atX), Math.floor(atY));
+        unit.path = gameState.map.findPath(Math.floor(unit.x), Math.floor(unit.y), Math.floor(atX), Math.floor(atY), 0, unit);
         unit.pathIndex = 0;
         unit.pathRecalcTimer = 45;
       }
@@ -343,44 +483,60 @@ function updateUnitAI(unit) {
     return;
   }
   if (unit.attackMoveTarget && unit.damage > 0) {
-    var nbAM = gameState.getEnemiesInRange(unit, unit.range + 2);
-    if (nbAM.length > 0) {
-      var cl = nbAM[0], cd = Infinity;
-      for (var n = 0; n < nbAM.length; n++) {
-        var nd = Math.hypot(nbAM[n].x - unit.x, nbAM[n].y - unit.y);
-        if (nd < cd) { cd = nd; cl = nbAM[n]; }
-      }
-      unit.attackTarget = cl;
+    var nbAM = pickAttackTarget(unit, gameState.getEnemiesInRange(unit, unit.range + 2));
+    if (nbAM) {
+      unit.attackTarget = nbAM;
       return;
     }
     if (Math.hypot(unit.x - unit.attackMoveTarget.x, unit.y - unit.attackMoveTarget.y) < 2) unit.attackMoveTarget = null;
   }
+  // 出厂单位走完到集结点的路径后，就地转入守卫（红警2 行为）
+  if (unit.autoGuard && unit.path.length > 0 && unit.pathIndex >= unit.path.length) {
+    unit.guardPos = { x: Math.floor(unit.x), y: Math.floor(unit.y) };
+    unit.autoGuard = false;
+    unit.path = [];
+  }
+
   if (unit.guardPos && unit.damage > 0) {
-    var nbG = gameState.getEnemiesInRange(unit, unit.range + 2);
-    if (nbG.length > 0) { unit.attackTarget = nbG[0]; return; }
+    // 1) 射程内目标：原地开火，不移动
+    var gInRange = pickAttackTarget(unit, gameState.getEnemiesInRange(unit, unit.range));
+    if (gInRange) {
+      if (unit.fireCooldown <= 0 && unit.canAttack(gInRange)) {
+        unit.turretDir = Math.atan2(gInRange.getCenterY() - unit.getCenterY(),
+                                    gInRange.getCenterX() - unit.getCenterX());
+        performAttack(unit, gInRange);
+      }
+      return;
+    }
     var gd = Math.hypot(unit.x - unit.guardPos.x, unit.y - unit.guardPos.y);
-    if (gd > 4) {
-      if (unit.path.length === 0 || unit.pathIndex >= unit.path.length) {
+    // 2) 射程外但在警戒范围内：有限追击，追出太远就放弃
+    var gNear = pickAttackTarget(unit, gameState.getEnemiesInRange(unit, unit.range + 3));
+    if (gNear && gd < GUARD_CHASE_RANGE) {
+      unit.attackTarget = gNear;
+      return;
+    }
+    // 3) 脱离警戒或离位过远：回到守卫点
+    if (gd > 2) {
+      if ((unit.path.length === 0 || unit.pathIndex >= unit.path.length) && unit.pathRecalcTimer <= 0) {
         unit.path = gameState.map.findPath(Math.floor(unit.x), Math.floor(unit.y), unit.guardPos.x, unit.guardPos.y);
         unit.pathIndex = 0;
+        unit.pathRecalcTimer = 30; // 节流，避免回到守卫点后每帧重复寻路
       }
       moveUnit(unit);
       return;
     }
   }
-  if (!unit.attackTarget && unit.damage > 0) {
-    if (unit.team === TEAM_ENEMY || (unit.team === TEAM_PLAYER && unit.path.length === 0)) {
-      var nb = gameState.getEnemiesInRange(unit, unit.range + 1);
-      if (nb.length > 0 && unit.fireCooldown <= 0) {
-        var cl2 = nb[0], cd2 = Infinity;
-        for (var ni = 0; ni < nb.length; ni++) {
-          var nd2 = Math.hypot(nb[ni].x - unit.x, nb[ni].y - unit.y);
-          if (nd2 < cd2) { cd2 = nd2; cl2 = nb[ni]; }
-        }
-        var dist = Math.hypot((cl2.x + (cl2.isBuilding ? cl2.size / 2 : 0.5)) - (unit.x + 0.5), (cl2.y + (cl2.isBuilding ? cl2.size / 2 : 0.5)) - (unit.y + 0.5));
-        if (dist <= unit.range) performAttack(unit, cl2);
-        else if (unit.team === TEAM_ENEMY) unit.attackTarget = cl2;
-      }
+  // 红警2 行为：射程内自动开火，无需下达任何攻击命令。
+  // 原先玩家单位被限制成「只有停下（path 为空）才开火」，移动途中一路挨打却不还手
+  if (!unit.attackTarget && unit.damage > 0 && unit.fireCooldown <= 0) {
+    var cl2 = pickAttackTarget(unit, gameState.getEnemiesInRange(unit, unit.range + 1));
+    if (cl2) {
+      var dist = Math.hypot(
+        (cl2.x + (cl2.isBuilding ? cl2.size / 2 : 0.5)) - (unit.x + 0.5),
+        (cl2.y + (cl2.isBuilding ? cl2.size / 2 : 0.5)) - (unit.y + 0.5));
+      if (dist <= unit.range) performAttack(unit, cl2);
+      // 只有 AI 会自动追出射程；玩家单位不擅自脱离玩家下达的移动命令
+      else if (unit.team === TEAM_ENEMY) unit.attackTarget = cl2;
     }
   }
   if (unit.team === TEAM_ENEMY && unit.lastDamagedBy && !unit.lastDamagedBy.dead && unit.lastDamagedTimer > 0 && !unit.attackTarget) {
@@ -392,7 +548,7 @@ function updateUnitAI(unit) {
 function updateHarvesterAI(unit) {
   if (unit.ore >= unit.capacity) unit.returningToRefinery = true;
   if (unit.returningToRefinery) {
-    var ref = gameState.map.findNearestRefinery(unit.x, unit.y, unit.team, gameState.entities);
+    var ref = gameState.map.findNearestRefinery(unit.x, unit.y, unit.team, gameState.getRefineries(unit.team));
     if (!ref) { unit.returningToRefinery = false; return; }
     var refX = Math.floor(ref.x) + Math.floor(ref.size / 2);
     var refY = Math.floor(ref.y) + Math.floor(ref.size / 2);
@@ -437,6 +593,7 @@ function updateHarvesterAI(unit) {
         gameState.map.oreAmount[unit.harvestTarget.y][unit.harvestTarget.x] -= amt;
         if (gameState.map.oreAmount[unit.harvestTarget.y][unit.harvestTarget.x] <= 0) {
           gameState.map.terrain[unit.harvestTarget.y][unit.harvestTarget.x] = GRASS;
+          gameState.map._removeOreFromCache(unit.harvestTarget.x, unit.harvestTarget.y);
           unit.harvestTarget = null;
           unit.path = [];
           unit.pathIndex = 0;
@@ -445,7 +602,7 @@ function updateHarvesterAI(unit) {
     }
   } else {
     if (unit.path.length === 0 || unit.pathIndex >= unit.path.length || unit.pathRecalcTimer <= 0) {
-      unit.path = gameState.map.findPath(Math.floor(unit.x), Math.floor(unit.y), unit.harvestTarget.x, unit.harvestTarget.y);
+      unit.path = gameState.map.findPath(Math.floor(unit.x), Math.floor(unit.y), unit.harvestTarget.x, unit.harvestTarget.y, 3000, unit);
       unit.pathIndex = 0;
       unit.pathRecalcTimer = 90;
     }
@@ -457,22 +614,34 @@ function moveUnit(unit) {
   if (unit.path.length > 0 && unit.pathIndex < unit.path.length) {
     var wp = unit.path[unit.pathIndex];
     var occ = gameState.map.occupancy[wp.y] && gameState.map.occupancy[wp.y][wp.x];
-    if (occ && occ !== unit && !occ.isBuilding && occ.team === unit.team) {
-      unit.pathRecalcTimer--;
-      if (unit.pathRecalcTimer < -20) {
-        unit.path = gameState.map.findPath(Math.floor(unit.x), Math.floor(unit.y), unit.path[unit.path.length - 1].x, unit.path[unit.path.length - 1].y);
-        unit.pathIndex = 0;
-        unit.pathRecalcTimer = 30;
+
+    // 改进的单位避障（空军无视地面占用）
+    if (!unit.isAirUnit && occ && occ !== unit && !occ.isBuilding) {
+      if (occ.team === unit.team) {
+        // 友方单位 - 等待或绕行
+        unit.pathRecalcTimer--;
+        if (unit.pathRecalcTimer < -20) {
+          // 重新寻路，尝试绕过
+          unit.path = gameState.map.findPath(Math.floor(unit.x), Math.floor(unit.y), unit.path[unit.path.length - 1].x, unit.path[unit.path.length - 1].y, 3000, unit);
+          unit.pathIndex = 0;
+          unit.pathRecalcTimer = 30;
+        }
+        return;
+      } else {
+        // 敌方单位 - 继续移动（可以穿过以进行攻击）
       }
-      return;
     }
+
     var tx = wp.x + 0.5, ty = wp.y + 0.5;
     var dx = tx - unit.x, dy = ty - unit.y;
     var dist = Math.hypot(dx, dy);
-    var terrain = gameState.map.terrain[Math.floor(unit.y)] && gameState.map.terrain[Math.floor(unit.y)][Math.floor(unit.x)];
     var tMod = 1;
-    if (terrain === SAND) tMod = 0.85;
-    else if (terrain === CONCRETE) tMod = 1.15;
+    if (!unit.isAirUnit) {
+      var terrain = gameState.map.terrain[Math.floor(unit.y)] && gameState.map.terrain[Math.floor(unit.y)][Math.floor(unit.x)];
+      if (terrain === SAND) tMod = 0.85;
+      else if (terrain === CONCRETE) tMod = 1.15;
+      else if (terrain === TREE) tMod = 0.7; // 树林减速
+    }
     var ms = unit.speed * 0.075 * tMod;
     if (dist < ms) { unit.x = tx; unit.y = ty; unit.pathIndex++; }
     else { unit.x += dx / dist * ms; unit.y += dy / dist * ms; unit.direction = Math.atan2(dy, dx); unit.turretDir = unit.direction; }
@@ -481,17 +650,57 @@ function moveUnit(unit) {
   }
 }
 
+// 光棱塔链式聚焦的最大链接距离（格）
+var PRISM_LINK_RANGE = 8;
+
+/**
+ * 统计能参与光棱塔链式聚焦的友方光棱塔数量（不含自身）。
+ * 红警2 中相邻光棱塔会把光束汇聚到同一目标，逐座叠加伤害。
+ */
+function countLinkedPrisms(tower, target) {
+  var linked = 0;
+  var list = gameState.entities;
+  for (var i = 0; i < list.length; i++) {
+    var e = list[i];
+    if (e === tower || e.dead || !e.built || e.type !== 'prismTower') continue;
+    if (e.team !== tower.team) continue;
+    if (Math.hypot(e.x - tower.x, e.y - tower.y) > PRISM_LINK_RANGE) continue;
+    // 只有自身射程也覆盖得了目标，才算真正参与聚焦
+    var dt = Math.hypot(e.getCenterX() - target.getCenterX(), e.getCenterY() - target.getCenterY());
+    if (dt <= e.range * TILE_SIZE) linked++;
+  }
+  return linked;
+}
+
 function performAttack(attacker, target) {
   attacker.fireCooldown = attacker.fireRate;
   attacker.muzzleFlash = 6;
   attacker.turretDir = Math.atan2(target.getCenterY() / TILE_SIZE - attacker.y - 0.5, target.getCenterX() / TILE_SIZE - attacker.x - 0.5);
-  var dmg = attacker.damage;
-  if (attacker.antiArmor && target.type2 === 'vehicle') dmg = Math.floor(dmg * 2.2);
-  if (attacker.type2 === 'vehicle' && target.type2 === 'infantry') dmg = Math.floor(dmg * 0.5);
-  if (attacker.veterancy >= 1) dmg = Math.floor(dmg * 1.25);
-  if (attacker.veterancy >= 2) dmg = Math.floor(dmg * 1.5);
-  var scatter = 0.85 + Math.random() * 0.3;
-  dmg = Math.floor(dmg * scatter);
+  
+  // 使用新的伤害计算系统
+  var dmg = attacker.calculateDamage ? attacker.calculateDamage(target) : attacker.damage;
+
+  // ===== 红警2 单位特性（definitions 里已定义，此前逻辑未实装）=====
+  var atkDef = UNIT_DEFS[attacker.type];
+  // 军犬：扑咬步兵一击必杀
+  if (attacker.type === 'attackDog' && target.type2 === 'infantry') {
+    dmg = Math.max(dmg, target.hp + 10);
+  }
+  // 谭雅的 C4：对建筑是毁灭性的，原版可单兵拆家
+  if (attacker.c4 && target.isBuilding) {
+    dmg = Math.floor(dmg * 8);
+  }
+  // 光棱塔链式聚焦：射程内其他光棱塔把光束汇聚到同一目标，逐座叠加伤害
+  if (atkDef && atkDef.canLink) {
+    var linked = countLinkedPrisms(attacker, target);
+    if (linked > 0) dmg = Math.floor(dmg * (1 + linked * 0.5));
+  }
+
+  // 空军单位消耗弹药
+  if (attacker.isAirUnit && attacker.ammo !== null) {
+    attacker.consumeAmmo();
+  }
+  
   target.lastDamagedBy = attacker;
   target.lastDamagedTimer = 180;
   if (target.team === TEAM_PLAYER && target.isBuilding && gameState.underAttackAlertCooldown === 0) {
@@ -506,14 +715,30 @@ function performAttack(attacker, target) {
     performBurstShot(attacker, target);
     return;
   }
-  var projType = (attacker.type2 === 'vehicle' || attacker.type === 'turret' || attacker.type === 'aaGun') ? 'shell' : 'bullet';
-  if (attacker.type === 'tesla') projType = 'tesla';
+  
+  // 确定投射物类型
+  var projType = 'bullet';
+  if (attacker.damageType === 'cannon' || attacker.type === 'turret') projType = 'shell';
+  else if (attacker.damageType === 'rocket' || attacker.damageType === 'missile') projType = 'rocket';
+  else if (attacker.damageType === 'laser') projType = 'laser';
+  else if (attacker.damageType === 'electric' || attacker.type === 'tesla') projType = 'tesla';
   else if (attacker.type === 'arty') projType = 'shell';
-  else if (attacker.type === 'rocket' || attacker.type === 'mlrs') projType = 'rocket';
+  
   var from = { x: attacker.getCenterX(), y: attacker.getCenterY() };
   gameState.addProjectile(from, target, dmg, attacker.team, projType, attacker.splashRadius);
+
+  // 天启坦克双炮管：并排两发齐射
+  if (atkDef && atkDef.dualGun) {
+    var from2 = { x: attacker.getCenterX() - 7, y: attacker.getCenterY() };
+    gameState.addProjectile(from2, target, dmg, attacker.team, projType, attacker.splashRadius);
+  }
+
+  // 播放音效
   if (projType === 'bullet') audioManager.playShoot();
-  else if (projType === 'shell' || projType === 'rocket') { try { setTimeout(function() { audioManager.playSound(180, 'sawtooth', 0.12, 0.06); }, 80); } catch (e) {} }
+  else if (projType === 'laser') audioManager.playSound(800, 'sine', 0.1, 0.1);
+  else if (projType === 'shell' || projType === 'rocket') { 
+    try { setTimeout(function() { audioManager.playSound(180, 'sawtooth', 0.12, 0.06); }, 80); } catch (e) {} 
+  }
 }
 
 function performBurstShot(attacker, target) {
@@ -536,25 +761,16 @@ function updateProjectiles() {
     var dx = p.targetX - p.x, dy = p.targetY - p.y;
     var dist = Math.hypot(dx, dy);
     if (dist < p.speed * 2) {
-      if (p.target && !p.target.dead) {
-        p.target.hp -= p.damage;
-        p.target.flashTimer = 5;
-        if (p.type === 'shell' || p.type === 'tesla') gameState.addExplosion(p.targetX, p.targetY, 20, p.type === 'tesla' ? 'electric' : 'fire');
-        else if (p.type === 'rocket') gameState.addExplosion(p.targetX, p.targetY, 16, 'fire');
-        if (p.splash > 0) {
-          gameState.applySplashDamage(p.targetX, p.targetY, p.splash, Math.floor(p.damage * 0.6), p.team);
-          gameState.addExplosion(p.targetX, p.targetY, p.splash * TILE_SIZE * 0.6, 'big');
-        }
-        if (p.target.hp <= 0) {
-          p.target.hp = 0;
-          gameState.addExplosion(p.targetX, p.targetY, 36, 'big');
-          audioManager.playExplosion();
-          if (p.target.type === 'base') { gameState.gameOver = true; gameState.winner = p.target.team === TEAM_PLAYER ? TEAM_ENEMY : TEAM_PLAYER; }
-          gameState.removeEntity(p.target);
-        } else {
-          gameState.addFloatingText(p.targetX, p.targetY - 10, '-' + p.damage, '#ff6b6b');
-        }
-      } else if (p.splash > 0) {
+    if (p.target && !p.target.dead) {
+      if (p.type === 'shell' || p.type === 'tesla') gameState.addExplosion(p.targetX, p.targetY, 20, p.type === 'tesla' ? 'electric' : 'fire');
+      else if (p.type === 'rocket') gameState.addExplosion(p.targetX, p.targetY, 16, 'fire');
+      if (p.splash > 0) {
+        gameState.applySplashDamage(p.targetX, p.targetY, p.splash, Math.floor(p.damage * 0.6), p.team);
+        gameState.addExplosion(p.targetX, p.targetY, p.splash * TILE_SIZE * 0.6, 'big');
+      }
+      // 统一伤害入口：扣血/无敌判定/击杀归属/死亡清理
+      gameState.damageEntity(p.target, p.damage);
+    } else if (p.splash > 0) {
         gameState.addExplosion(p.targetX, p.targetY, 24, 'fire');
         gameState.applySplashDamage(p.targetX, p.targetY, p.splash, Math.floor(p.damage * 0.5), p.team);
       }
@@ -602,6 +818,13 @@ function updateMinimapAlerts() {
 }
 
 function updateResources() {
+  if (gameState.lowPowerAlertCooldown > 0) gameState.lowPowerAlertCooldown--;
+  if (gameState.underAttackAlertCooldown > 0) gameState.underAttackAlertCooldown--;
+  // 间谍渗透电厂造成的断电倒计时
+  if (gameState.playerPowerBlackout > 0) gameState.playerPowerBlackout--;
+  if (gameState.enemyPowerBlackout > 0) gameState.enemyPowerBlackout--;
+  // 电力/单位数等统计无需每帧精确，降频扫描
+  if (frameCount % 15 !== 0) return;
   var pp = 0, ppU = 0, ep = 0, epU = 0, uc = 0;
   for (var i = 0; i < gameState.entities.length; i++) {
     var e = gameState.entities[i];
@@ -609,22 +832,26 @@ function updateResources() {
     if (e.isBuilding) {
       if (e.team === TEAM_PLAYER) { pp += e.power || 0; ppU += e.powerUse || 0; }
       else { ep += e.power || 0; epU += e.powerUse || 0; }
+      // 注册超级武器（建成即计时，覆盖建造/读档/占领三种来源）
+      var bdef = BUILDING_DEFS[e.type];
+      if (bdef && bdef.superWeapon) gameState.superWeaponManager.addSuperWeapon(bdef.superWeapon, e.team);
     } else if (e.team === TEAM_PLAYER) uc++;
   }
+  // 间谍渗透电厂：发电量骤降至 20%，磁暴线圈这类耗电建筑会直接停摆
+  if (gameState.playerPowerBlackout > 0) pp = Math.floor(pp * 0.2);
+  if (gameState.enemyPowerBlackout > 0) ep = Math.floor(ep * 0.2);
   gameState.playerPower = pp;
   gameState.playerPowerUse = ppU;
   gameState.enemyPower = ep;
   gameState.enemyPowerUse = epU;
   gameState.playerUnitCount = uc;
   gameState.hasRadar = gameState.hasBuilding(TEAM_PLAYER, 'radar');
-  gameState.hasTechCenter = gameState.hasBuilding(TEAM_PLAYER, 'techCenter');
-  if (gameState.lowPowerAlertCooldown > 0) gameState.lowPowerAlertCooldown--;
+  gameState.hasTechCenter = gameState.hasBuilding(TEAM_PLAYER, 'alliedTech') || gameState.hasBuilding(TEAM_PLAYER, 'sovietTech');
   if (gameState.playerPower < gameState.playerPowerUse && gameState.lowPowerAlertCooldown === 0) {
     notify('\u8b66\u544a: \u7535\u529b\u4e0d\u8db3\uff01', 'warn');
     audioManager.playAlert();
     gameState.lowPowerAlertCooldown = 600;
   }
-  if (gameState.underAttackAlertCooldown > 0) gameState.underAttackAlertCooldown--;
 }
 
 function updateEnemyAI() {
@@ -665,6 +892,69 @@ function startBuild(type, team) {
   }
 }
 
+// 守卫模式下允许的追击距离（离守卫点的最大距离），超出则返回守卫点
+var GUARD_CHASE_RANGE = 5;
+// 维修站：有效范围（格）与每次修复量。原先 4 格、每 12 帧 +3（约 15HP/s），
+// 灰熊要 20 秒才修满，慢到玩家根本感知不到
+var REPAIR_BAY_RANGE = 5;
+var REPAIR_BAY_HEAL = 6;
+// 间谍：渗透判定距离（格）、渗透电厂造成的断电时长（帧）
+var SPY_INFILTRATE_DIST = 1.5;
+var SPY_BLACKOUT_FRAMES = 900;
+
+/**
+ * 间谍渗透：潜入敌方建筑触发效果后消失（红警2 核心玩法）。
+ * 返回 true 表示已渗透，调用方应结束该单位本帧的后续处理。
+ */
+function updateSpyInfiltration(unit) {
+  if (unit.type !== 'spy' || unit.dead) return false;
+  for (var i = 0; i < gameState.entities.length; i++) {
+    var t = gameState.entities[i];
+    if (t.dead || !t.isBuilding || t.team === unit.team) continue;
+    var d = Math.hypot(unit.x - (t.x + t.size / 2), unit.y - (t.y + t.size / 2));
+    if (d > SPY_INFILTRATE_DIST) continue;
+
+    var enemyIsPlayer = (t.team === TEAM_PLAYER);
+    var pool = enemyIsPlayer ? gameState.playerCredits : gameState.enemyCredits;
+    var gain = enemyIsPlayer ? gameState.enemyCredits : gameState.playerCredits;
+    var msg = '';
+
+    if (t.type === 'powerPlant') {
+      if (enemyIsPlayer) gameState.playerPowerBlackout = SPY_BLACKOUT_FRAMES;
+      else gameState.enemyPowerBlackout = SPY_BLACKOUT_FRAMES;
+      msg = '\u7535\u5382\u88ab\u6e17\u900f\uff0c\u7535\u529b\u4e2d\u65ad 15 \u79d2';
+    } else if (t.type === 'barracks' || t.type === 'warFactory') {
+      // 渗透生产建筑：己方现有部队全部晋升为老兵
+      var promoted = 0;
+      for (var k = 0; k < gameState.entities.length; k++) {
+        var u = gameState.entities[k];
+        if (u.dead || u.isBuilding || u.team !== unit.team) continue;
+        if (u.veterancy < 1) { u.veterancy = 1; promoted++; }
+      }
+      msg = '\u90e8\u961f\u664b\u5347\uff1a' + promoted + ' \u4e2a\u5355\u4f4d\u6210\u4e3a\u8001\u5175';
+    } else {
+      // 矿厂 / 雷达 / 其他：按建筑类型窃取资金或情报
+      var ratio = (t.type === 'refinery') ? 0.25 : 0.1;
+      var stolen = Math.floor(pool * ratio);
+      if (enemyIsPlayer) { gameState.playerCredits -= stolen; gameState.enemyCredits += stolen; }
+      else { gameState.enemyCredits -= stolen; gameState.playerCredits += stolen; }
+      msg = (t.type === 'refinery' ? '\u5077\u53d6\u8d44\u91d1 ' : '\u83b7\u53d6\u60c5\u62a5\uff0c\u7b79\u6b3e ') + '$' + stolen;
+    }
+
+    notify((unit.team === TEAM_PLAYER ? '\u6e17\u900f\u6210\u529f\uff1a' : '\u8b66\u544a\uff1a') + msg,
+           unit.team === TEAM_PLAYER ? 'info' : 'danger');
+    gameState.addFloatingText(t.getCenterX(), t.getCenterY() - 16, '\u6e17\u900f!', '#95a5a6');
+    unit.dead = true;
+    unit.deathTimer = 1;
+    return true;
+  }
+  return false;
+}
+
+// 能产出单位的建筑。此前直接用 def.requires 匹配，导致「谭雅」这类
+// requires 为 ['barracks','alliedTech'] 的单位可能拿科技中心当生产建筑用
+var PRODUCER_BUILDINGS = ['barracks', 'warFactory', 'refinery'];
+
 function findProducingBuilding(type, team) {
   var def = UNIT_DEFS[type];
   if (!def) return null;
@@ -672,7 +962,10 @@ function findProducingBuilding(type, team) {
   for (var i = 0; i < gameState.entities.length; i++) {
     var e = gameState.entities[i];
     if (e.team === team && e.built && !e.dead && e.isBuilding) {
-      var match = (type === 'harvester' && e.type === 'refinery') || (def.requires && def.requires.indexOf(e.type) >= 0);
+      if (PRODUCER_BUILDINGS.indexOf(e.type) < 0) continue;
+      // 采矿车（含苏联武装采矿车）由矿厂产出，其余按 requires 中的生产建筑匹配
+      var match = (def.type === 'harvester' && e.type === 'refinery') ||
+                  (def.requires && def.requires.indexOf(e.type) >= 0);
       if (match) {
         if (!e.producing) return e;
         if (!fallback) fallback = e;
@@ -709,6 +1002,25 @@ function commandStop() {
       u.burstTarget = null;
     });
     notify('\u505c\u6b62\u547d\u4ee4', 'info');
+  }
+}
+
+function fireSuperWeapon(type, mapX, mapY) {
+  var swm = gameState.superWeaponManager;
+  if (input) input._callbacks.superWeaponTargeting = null;
+  if (type === '__chronoDest') {
+    var pending = swm.getPendingChrono(TEAM_PLAYER);
+    if (pending) {
+      swm.completeChronoShift(pending, mapX, mapY);
+      notify('\u8d85\u65f6\u7a7a\u4f20\u9001\u5b8c\u6210', 'info');
+    }
+    return;
+  }
+  if (swm.useSuperWeapon(type, TEAM_PLAYER, mapX, mapY)) {
+    notify('\u8d85\u7ea7\u6b66\u5668\u5df2\u53d1\u52a8', 'info');
+  } else {
+    notify('\u76ee\u6807\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9', 'warn');
+    audioManager.playCancel();
   }
 }
 
@@ -750,6 +1062,16 @@ function cycleSpeed() {
   gameSpeed = gameSpeed === 1 ? 2 : (gameSpeed === 2 ? 4 : 1);
   document.getElementById('speedBtn').textContent = gameSpeed + '\u00d7';
   notify('\u6e38\u620f\u901f\u5ea6: ' + gameSpeed + '\u00d7', 'info');
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(function(err) {
+      notify('\u5168\u5c4f\u5931\u8d25: ' + err.message, 'warn');
+    });
+  } else {
+    document.exitFullscreen();
+  }
 }
 
 function showHelp() { ui.showHelp(); }
@@ -808,7 +1130,7 @@ function selectGroup(n) {
 
 function saveGame() {
   if (!gameState || !gameRunning) { notify('\u65e0\u6cd5\u5b58\u6863\uff1a\u6e38\u620f\u672a\u8fd0\u884c', 'warn'); return; }
-  var ok = saveManager.save(gameState, camera, difficulty, frameCount, enemyAI.attackWave);
+  var ok = saveManager.save(gameState, camera, difficulty, frameCount, enemyAI);
   if (ok) { notify('\u6e38\u620f\u5df2\u5b58\u6863', 'info'); audioManager.playBuild(); }
   else notify('\u5b58\u6863\u5931\u8d25', 'danger');
 }
@@ -818,13 +1140,34 @@ function loadGame() {
   if (!result) { notify('\u6ca1\u6709\u5b58\u6863\u6216\u5b58\u6863\u635f\u574f', 'warn'); return; }
   gameState = result.gameState;
   gameState._playExplosionSound = function() { audioManager.playExplosion(); };
+  wireSuperWeaponCallbacks(gameState.superWeaponManager);
+  gameState.superWeaponManager._statusCount = 0;
+  for (var ssi = 0; ssi < gameState.entities.length; ssi++) {
+    var sse = gameState.entities[ssi];
+    if (sse.ironCurtain > 0 || sse.chronoStun > 0) gameState.superWeaponManager._statusCount++;
+  }
+  window.__game = gameState;
+  if (ui._callbacks) ui._callbacks.gameState = gameState;
+  ui._lastUI = {}; // 重置 DOM 缓存，确保读档后全量刷新一次
   camera = result.camera;
+  // 关键：读档构造了全新的 GameState / camera，必须让输入层重新绑定，
+  // 否则所有鼠标操作仍作用在读档前的旧世界上
+  if (input) input.rebind(gameState, camera);
   difficulty = result.difficulty;
   frameCount = result.frameCount;
-  enemyAI.attackWave = result.enemyAttackWave;
+  var aiState = result.enemyAIState;
+  if (aiState) {
+    enemyAI.attackWave = aiState.attackWave || 0;
+    enemyAI.aiTimer = aiState.aiTimer || 0;
+    enemyAI.buildQueue = aiState.buildQueue || [];
+    enemyAI.attackTimer = aiState.attackTimer || 0;
+    enemyAI.scoutTimer = aiState.scoutTimer || 0;
+  }
   gameStartTime = result.gameStartTime;
   selectedUnits.length = 0;
   selectedBuilding = null;
+  // 存档会还原 selected 标记，但选中列表已被清空，需同步清理，否则残留绿色选中框
+  for (var cli = 0; cli < gameState.entities.length; cli++) gameState.entities[cli].selected = false;
   placingBuilding = false;
   placingType = null;
   gameRunning = true;
@@ -838,6 +1181,7 @@ function loadGame() {
     input._callbacks.placingBuilding = placingBuilding;
     input._callbacks.placingType = placingType;
     input._callbacks.activeAction = activeAction;
+    input._callbacks.superWeaponTargeting = null;
   }
   document.getElementById('startScreen').style.display = 'none';
   document.getElementById('gameOver').style.display = 'none';
@@ -850,6 +1194,7 @@ function loadGame() {
 window.startGame = startGame;
 window.togglePause = togglePause;
 window.cycleSpeed = cycleSpeed;
+window.toggleFullscreen = toggleFullscreen;
 window.showHelp = showHelp;
 window.hideHelp = hideHelp;
 window.toggleAction = toggleAction;

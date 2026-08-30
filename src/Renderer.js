@@ -1,6 +1,7 @@
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, GRASS, WATER, ORE, ROCK, CONCRETE, SAND, TREE,
-         TEAM_PLAYER, TEAM_ENEMY, COLOR_PLAYER, COLOR_PLAYER_DARK, COLOR_ENEMY, COLOR_ENEMY_DARK } from './constants.js';
-import { BUILDING_DEFS, DEFENSE_DEFS, UNIT_DEFS } from './definitions.js';
+         TEAM_PLAYER, TEAM_ENEMY, COLOR_PLAYER, COLOR_PLAYER_DARK, COLOR_ENEMY, COLOR_ENEMY_DARK,
+         COLOR_ALLIED, COLOR_ALLIED_DARK, COLOR_SOVIET, COLOR_SOVIET_DARK, TYPE_AIRCRAFT, TYPE_HELICOPTER, TYPE_AIRSHIP } from './constants.js';
+import { BUILDING_DEFS, DEFENSE_DEFS, UNIT_DEFS, SUPER_WEAPONS, FACTION_ALLIED, FACTION_SOVIET } from './definitions.js';
 
 export class Renderer {
   constructor(canvas, minimapCanvas) {
@@ -11,6 +12,14 @@ export class Renderer {
     this.tileCache = {};
     this.minimapTerrainCanvas = null;
     this.minimapTerrainDirty = true;
+  }
+
+  getSortedEntities(gameState) {
+    // 单位每帧都在移动，y 序必须每帧重排，否则重叠绘制顺序错乱；
+    // 实体规模（~百级）下每帧排序开销可忽略
+    return gameState.entities.slice().sort(function(a, b) {
+      return (a.y + (a.isBuilding ? a.size : 1)) - (b.y + (b.isBuilding ? b.size : 1));
+    });
   }
 
   getTileCanvas(type, tx, ty) {
@@ -66,7 +75,7 @@ export class Renderer {
     }
   }
 
-  render(gameState, camera, frameCount, selectedUnits, selectedBuilding, placingBuilding, placingType, mouse, dragSelect, activeAction, gamePaused, viewWidth, viewHeight) {
+  render(gameState, camera, frameCount, selectedUnits, selectedBuilding, placingBuilding, placingType, mouse, dragSelect, activeAction, superWeaponTargeting, gamePaused, viewWidth, viewHeight) {
     var ctx = this.ctx;
     ctx.fillStyle = '#0a0a0a';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
@@ -83,11 +92,19 @@ export class Renderer {
     var endTX = Math.min(MAP_WIDTH, Math.ceil((camera.x / zoom + viewWidth / zoom) / TILE_SIZE) + 1);
     var endTY = Math.min(MAP_HEIGHT, Math.ceil((camera.y / zoom + viewHeight / zoom) / TILE_SIZE) + 1);
 
-    // Terrain
+    // Terrain with fog of war
     for (var ty = startTY; ty < endTY; ty++) {
       for (var tx = startTX; tx < endTX; tx++) {
         var sx = tx * TILE_SIZE;
         var sy = ty * TILE_SIZE;
+        
+        // 战争迷雾：未探索区域不渲染地形
+        if (gameState.fogOfWar && !gameState.fogOfWar.isExplored(tx, ty)) {
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(sx, sy, TILE_SIZE, TILE_SIZE);
+          continue;
+        }
+        
         var terrain = gameState.map.terrain[ty][tx];
         if (terrain === ORE) {
           ctx.fillStyle = '#2d5a1e'; ctx.fillRect(sx, sy, TILE_SIZE, TILE_SIZE);
@@ -120,16 +137,21 @@ export class Renderer {
       }
     }
 
-    // Entities sorted by y for proper overlap
-    var sortedE = gameState.entities.slice().sort(function(a, b) {
-      return (a.y + (a.isBuilding ? a.size : 1)) - (b.y + (b.isBuilding ? b.size : 1));
-    });
+    // Entities sorted by y for proper overlap (cached)
+    var sortedE = this.getSortedEntities(gameState);
     for (var ei = 0; ei < sortedE.length; ei++) {
       var e = sortedE[ei];
       var ex = e.x * TILE_SIZE;
       var ey2 = e.y * TILE_SIZE;
       var eS = e.size * TILE_SIZE;
       if (ex + eS < camera.x / zoom || ey2 + eS < camera.y / zoom || ex > camera.x / zoom + viewWidth / zoom || ey2 > camera.y / zoom + viewHeight / zoom) continue;
+      
+      // 战争迷雾：敌方单位在迷雾中不可见
+      if (gameState.fogOfWar && e.team !== TEAM_PLAYER) {
+        var centerX = Math.floor(e.x + (e.isBuilding ? e.size / 2 : 0.5));
+        var centerY = Math.floor(e.y + (e.isBuilding ? e.size / 2 : 0.5));
+        if (!gameState.fogOfWar.isVisible(centerX, centerY)) continue;
+      }
       if (e.dead) {
         ctx.globalAlpha = e.deathTimer / 45;
         ctx.fillStyle = '#1a1a1a';
@@ -137,8 +159,18 @@ export class Renderer {
         ctx.globalAlpha = 1;
         continue;
       }
-      var tc = e.team === TEAM_PLAYER ? COLOR_PLAYER : COLOR_ENEMY;
-      var td = e.team === TEAM_PLAYER ? COLOR_PLAYER_DARK : COLOR_ENEMY_DARK;
+      // 根据阵营获取颜色
+      var tc, td;
+      if (e.faction === FACTION_ALLIED) {
+        tc = COLOR_ALLIED;
+        td = COLOR_ALLIED_DARK;
+      } else if (e.faction === FACTION_SOVIET) {
+        tc = COLOR_SOVIET;
+        td = COLOR_SOVIET_DARK;
+      } else {
+        tc = e.team === TEAM_PLAYER ? COLOR_PLAYER : COLOR_ENEMY;
+        td = e.team === TEAM_PLAYER ? COLOR_PLAYER_DARK : COLOR_ENEMY_DARK;
+      }
       if (e.flashTimer > 0) ctx.globalAlpha = 0.5 + Math.sin(e.flashTimer * 2) * 0.5;
       if (e.isBuilding) this.drawBuilding(e, ex, ey2, eS, tc, td, gameState, frameCount);
       else this.drawUnit(e, ex, ey2, tc, td, frameCount);
@@ -181,6 +213,13 @@ export class Renderer {
           ctx.lineTo(ex + v * 5 + 8, ey2 + eS - 2);
           ctx.closePath(); ctx.fill();
         }
+      }
+      // 无敌（铁幕）状态：紫色脉冲描边
+      if (e.invulnerable) {
+        var ivPulse = 0.45 + Math.sin(frameCount * 0.2) * 0.3;
+        ctx.strokeStyle = 'rgba(142,68,173,' + ivPulse + ')';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(ex - 3, ey2 - 3, eS + 6, eS + 6);
       }
     }
 
@@ -306,6 +345,16 @@ export class Renderer {
     }
     ctx.textAlign = 'left';
 
+    // 战争迷雾：在世界坐标系内一次 drawImage 覆盖未探索/无视野区域
+    if (gameState.fogOfWar) {
+      gameState.fogOfWar.render(ctx);
+    }
+
+    // 超级武器效果渲染（世界坐标系，跟随镜头与缩放）
+    if (gameState.superWeaponManager) {
+      gameState.superWeaponManager.render(ctx, frameCount);
+    }
+
     // Building placement ghost
     if (placingBuilding && placingType && mouse.inCanvas) {
       var pd2 = BUILDING_DEFS[placingType] || DEFENSE_DEFS[placingType];
@@ -333,6 +382,27 @@ export class Renderer {
           ctx.setLineDash([]);
         }
       }
+    }
+
+    // 超级武器瞄准预览
+    if (superWeaponTargeting && mouse.inCanvas) {
+      var swDef = SUPER_WEAPONS[superWeaponTargeting];
+      var swRadius = swDef ? (swDef.radius || (superWeaponTargeting === 'ironCurtain' ? 3 : 2)) : 2;
+      var swx = mouse.mapX * TILE_SIZE + TILE_SIZE / 2;
+      var swy = mouse.mapY * TILE_SIZE + TILE_SIZE / 2;
+      var swPulse = 0.5 + Math.sin(frameCount * 0.15) * 0.25;
+      ctx.fillStyle = 'rgba(231,76,60,0.12)';
+      ctx.beginPath(); ctx.arc(swx, swy, swRadius * TILE_SIZE, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(231,76,60,' + swPulse + ')';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.arc(swx, swy, swRadius * TILE_SIZE, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(231,76,60,0.9)';
+      ctx.beginPath();
+      ctx.moveTo(swx - 8, swy); ctx.lineTo(swx + 8, swy);
+      ctx.moveTo(swx, swy - 8); ctx.lineTo(swx, swy + 8);
+      ctx.stroke();
     }
 
     ctx.restore();
@@ -474,21 +544,112 @@ export class Renderer {
           ctx.beginPath(); ctx.arc(ex + eS * 0.5, ey2 + eS * 0.4, 4, 0, Math.PI * 2); ctx.fill();
         }
         break;
-      case 'techCenter':
-        ctx.fillStyle = '#0e6655';
+      case 'alliedTech':
+      case 'sovietTech': {
+        var techBase = e.type === 'alliedTech' ? '#0e6655' : '#641e16';
+        var techGlow = e.type === 'alliedTech' ? '#1abc9c' : '#e74c3c';
+        ctx.fillStyle = techBase;
         ctx.fillRect(ex + 4, ey2 + 4, eS - 8, eS - 8);
-        ctx.fillStyle = '#1abc9c';
+        ctx.fillStyle = techGlow;
         ctx.fillRect(ex + eS * 0.12, ey2 + eS * 0.12, eS * 0.76, eS * 0.28);
         for (var di = 0; di < 3; di++) {
-          ctx.fillStyle = 'rgba(26,188,156,0.7)';
+          ctx.fillStyle = techGlow === '#1abc9c' ? 'rgba(26,188,156,0.7)' : 'rgba(231,76,60,0.7)';
           ctx.beginPath();
           ctx.arc(ex + eS * (0.25 + di * 0.25), ey2 + eS * 0.65, 6 + Math.sin(frameCount * 0.08 + di) * 2, 0, Math.PI * 2);
           ctx.fill();
         }
         if (e.built && frameCount % 15 < 7) {
-          ctx.fillStyle = 'rgba(26,188,156,0.2)';
+          ctx.fillStyle = techGlow === '#1abc9c' ? 'rgba(26,188,156,0.2)' : 'rgba(231,76,60,0.2)';
           ctx.beginPath(); ctx.arc(ex + eS * 0.5, ey2 + eS * 0.5, eS * 0.55, 0, Math.PI * 2); ctx.fill();
         }
+        break;
+      }
+      case 'orePurifier':
+        ctx.fillStyle = '#7d6608';
+        ctx.fillRect(ex + 4, ey2 + 4, eS - 8, eS - 8);
+        ctx.fillStyle = '#b7950b';
+        ctx.fillRect(ex + eS * 0.15, ey2 + eS * 0.15, eS * 0.7, eS * 0.7);
+        // 漏斗与金流
+        ctx.fillStyle = '#f1c40f';
+        ctx.beginPath();
+        ctx.moveTo(ex + eS * 0.3, ey2 + eS * 0.2);
+        ctx.lineTo(ex + eS * 0.7, ey2 + eS * 0.2);
+        ctx.lineTo(ex + eS * 0.55, ey2 + eS * 0.5);
+        ctx.lineTo(ex + eS * 0.55, ey2 + eS * 0.7);
+        ctx.lineTo(ex + eS * 0.45, ey2 + eS * 0.7);
+        ctx.lineTo(ex + eS * 0.45, ey2 + eS * 0.5);
+        ctx.closePath(); ctx.fill();
+        if (e.built && frameCount % 30 < 15) {
+          ctx.fillStyle = 'rgba(241,196,15,0.35)';
+          ctx.fillRect(ex + eS * 0.42, ey2 + eS * 0.72, eS * 0.16, eS * 0.14);
+        }
+        break;
+      case 'nukeSilo':
+        ctx.fillStyle = '#4a1518';
+        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
+        ctx.fillStyle = '#2c0d0f';
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, eS * 0.36, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#7f8c8d'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, eS * 0.36, 0, Math.PI * 2); ctx.stroke();
+        // 辐射标志
+        ctx.fillStyle = '#f1c40f';
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, eS * 0.2, 0.5, 1.6); ctx.lineTo(ex + eS / 2, ey2 + eS / 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, eS * 0.2, 2.6, 3.7); ctx.lineTo(ex + eS / 2, ey2 + eS / 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, eS * 0.2, 4.7, 5.8); ctx.lineTo(ex + eS / 2, ey2 + eS / 2); ctx.fill();
+        if (e.built) {
+          var siloGlow = 0.3 + Math.sin(frameCount * 0.06) * 0.2;
+          ctx.fillStyle = 'rgba(231,76,60,' + siloGlow + ')';
+          ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, eS * 0.46, 0, Math.PI * 2); ctx.fill();
+        }
+        break;
+      case 'ironCurtain':
+        ctx.fillStyle = '#4a235a';
+        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
+        ctx.fillStyle = '#8e44ad';
+        ctx.fillRect(ex + eS / 2 - 5, ey2 + eS * 0.3, 10, eS * 0.45);
+        ctx.fillStyle = '#d7bde2';
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS * 0.25, 6, 0, Math.PI * 2); ctx.fill();
+        if (e.built && frameCount % 20 < 10) {
+          ctx.strokeStyle = 'rgba(142,68,173,0.8)';
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, eS * 0.42, frameCount * 0.05, frameCount * 0.05 + 2); ctx.stroke();
+        }
+        break;
+      case 'weatherControl':
+        ctx.fillStyle = '#4a3b8f';
+        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
+        ctx.fillStyle = '#9b59b6';
+        ctx.fillRect(ex + eS * 0.15, ey2 + eS * 0.45, eS * 0.7, eS * 0.35);
+        // 云朵
+        ctx.fillStyle = '#d2b4de';
+        ctx.beginPath(); ctx.arc(ex + eS * 0.35, ey2 + eS * 0.3, eS * 0.16, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex + eS * 0.55, ey2 + eS * 0.25, eS * 0.13, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex + eS * 0.68, ey2 + eS * 0.32, eS * 0.11, 0, Math.PI * 2); ctx.fill();
+        if (e.built && frameCount % 25 < 6) {
+          ctx.strokeStyle = '#f4ecf7'; ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(ex + eS * 0.5, ey2 + eS * 0.4);
+          ctx.lineTo(ex + eS * 0.45, ey2 + eS * 0.6);
+          ctx.lineTo(ex + eS * 0.55, ey2 + eS * 0.58);
+          ctx.lineTo(ex + eS * 0.48, ey2 + eS * 0.8);
+          ctx.stroke();
+        }
+        break;
+      case 'chronosphere':
+        ctx.fillStyle = '#0b3c5d';
+        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
+        ctx.fillStyle = '#154360';
+        ctx.fillRect(ex + eS * 0.2, ey2 + eS * 0.5, eS * 0.6, eS * 0.3);
+        ctx.save();
+        ctx.translate(ex + eS / 2, ey2 + eS * 0.35);
+        ctx.rotate(frameCount * 0.06);
+        ctx.strokeStyle = '#00bfff'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(0, 0, eS * 0.26, 0, Math.PI * 1.4); ctx.stroke();
+        ctx.rotate(Math.PI);
+        ctx.beginPath(); ctx.arc(0, 0, eS * 0.26, 0, Math.PI * 1.4); ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = '#aef0ff';
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS * 0.35, 3 + Math.sin(frameCount * 0.1) * 1.5, 0, Math.PI * 2); ctx.fill();
         break;
       case 'repairBay':
         ctx.fillStyle = '#2c3e50';
@@ -533,13 +694,8 @@ export class Renderer {
         ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
         ctx.fillStyle = tc;
         ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, 13, 0, Math.PI * 2); ctx.fill();
-        // Turret rotates toward enemies
-        var turretAngle = 0;
-        var nrTar = gameState.getEnemiesInRange(e, e.range);
-        if (nrTar.length > 0) {
-          turretAngle = Math.atan2(nrTar[0].getCenterY() / TILE_SIZE - e.y - e.size / 2,
-                                   nrTar[0].getCenterX() / TILE_SIZE - e.x - e.size / 2);
-        }
+        // Use cached turret angle from update phase
+        var turretAngle = e.renderTurretAngle || 0;
         ctx.save();
         ctx.translate(ex + eS / 2, ey2 + eS / 2);
         ctx.rotate(turretAngle);
@@ -549,30 +705,11 @@ export class Renderer {
         ctx.fillStyle = '#555';
         ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, 6, 0, Math.PI * 2); ctx.fill();
         break;
-      case 'aaGun':
-        ctx.fillStyle = td;
-        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
-        ctx.fillStyle = '#16a085';
-        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, 11, 0, Math.PI * 2); ctx.fill();
-        // Twin barrels
-        var aaAngle = 0;
-        var aaTar = gameState.getEnemiesInRange(e, e.range);
-        if (aaTar.length > 0) {
-          aaAngle = Math.atan2(aaTar[0].getCenterY() / TILE_SIZE - e.y - e.size / 2,
-                               aaTar[0].getCenterX() / TILE_SIZE - e.x - e.size / 2);
-        }
-        ctx.save();
-        ctx.translate(ex + eS / 2, ey2 + eS / 2);
-        ctx.rotate(aaAngle);
-        ctx.fillStyle = '#222';
-        ctx.fillRect(0, -5, 15, 3);
-        ctx.fillRect(0, 2, 15, 3);
-        ctx.restore();
-        break;
       case 'tesla':
-        ctx.fillStyle = td;
+        // 磁暴线圈 - 苏联
+        ctx.fillStyle = '#5d4037';
         ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
-        ctx.fillStyle = '#5dade2';
+        ctx.fillStyle = '#8e44ad';
         ctx.fillRect(ex + eS / 2 - 4, ey2 + 4, 8, eS / 2 - 3);
         ctx.fillStyle = '#00bfff';
         ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + 8, 8, 0, Math.PI * 2); ctx.fill();
@@ -586,6 +723,57 @@ export class Renderer {
             ctx.lineTo(lx2, ly2); ctx.stroke();
           }
         }
+        break;
+      case 'prismTower':
+        // 光棱塔 - 盟军
+        ctx.fillStyle = '#34495e';
+        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
+        ctx.fillStyle = '#9b59b6';
+        ctx.beginPath();
+        ctx.moveTo(ex + eS / 2, ey2 + 4);
+        ctx.lineTo(ex + eS - 6, ey2 + eS - 6);
+        ctx.lineTo(ex + 6, ey2 + eS - 6);
+        ctx.fill();
+        ctx.fillStyle = '#e91e63';
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + 10, 6, 0, Math.PI * 2); ctx.fill();
+        // 充能效果
+        if (e.built && e.fireCooldown > e.fireRate - 10) {
+          ctx.strokeStyle = 'rgba(233,30,99,0.9)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(ex + eS / 2, ey2 + 10);
+          ctx.lineTo(ex + eS / 2 + (Math.random() - 0.5) * 30, ey2 + 10 - Math.random() * 25);
+          ctx.stroke();
+        }
+        break;
+      case 'patriot':
+        // 爱国者导弹 - 盟军防空
+        ctx.fillStyle = '#34495e';
+        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
+        ctx.fillStyle = '#3498db';
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, 10, 0, Math.PI * 2); ctx.fill();
+        var aaAngle = e.renderTurretAngle || 0;
+        ctx.save();
+        ctx.translate(ex + eS / 2, ey2 + eS / 2);
+        ctx.rotate(aaAngle);
+        ctx.fillStyle = '#ecf0f1';
+        ctx.fillRect(0, -2, 14, 4);
+        ctx.restore();
+        break;
+      case 'flakCannon':
+        // 高射炮 - 苏联防空
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(ex + 3, ey2 + 3, eS - 6, eS - 6);
+        ctx.fillStyle = '#c0392b';
+        ctx.beginPath(); ctx.arc(ex + eS / 2, ey2 + eS / 2, 11, 0, Math.PI * 2); ctx.fill();
+        var flakAngle = e.renderTurretAngle || 0;
+        ctx.save();
+        ctx.translate(ex + eS / 2, ey2 + eS / 2);
+        ctx.rotate(flakAngle);
+        ctx.fillStyle = '#222';
+        ctx.fillRect(0, -4, 12, 3);
+        ctx.fillRect(0, 1, 12, 3);
+        ctx.restore();
         break;
     }
 
@@ -624,8 +812,18 @@ export class Renderer {
   drawUnit(e, ex, ey2, tc, td, frameCount) {
     var ctx = this.ctx;
     var ux = ex + TILE_SIZE / 2, uy = ey2 + TILE_SIZE / 2;
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.beginPath(); ctx.ellipse(ux, uy + 8, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
+    
+    // 空军单位绘制阴影在地面
+    if (e.isAirUnit) {
+      var shadowY = uy + 15 + Math.sin(frameCount * 0.1) * 3;
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      ctx.beginPath(); ctx.ellipse(ux, shadowY, 12, 6, 0, 0, Math.PI * 2); ctx.fill();
+      // 空军单位在更高位置绘制
+      uy -= 15 + Math.sin(frameCount * 0.1) * 5;
+    } else {
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath(); ctx.ellipse(ux, uy + 8, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
+    }
 
     if (e.type2 === 'infantry') {
       var lo = Math.sin(e.animFrame * Math.PI / 2) * 3;
@@ -651,32 +849,7 @@ export class Renderer {
         ctx.fillStyle = '#333'; ctx.fillRect(ux + 4, uy - 3, 9, 2.5);
       }
     } else if (e.type2 === 'vehicle' || e.type2 === 'harvester') {
-      var treadAnim = Math.sin(e.animFrame * Math.PI / 2) * 2;
-      if (e.type === 'tank' || e.type === 'heavyTank') {
-        var ts = e.type === 'heavyTank' ? 14 : 11;
-        ctx.fillStyle = '#222';
-        ctx.fillRect(ux - ts, uy + 1, ts * 2, 7);
-        for (var ti = 0; ti < 6; ti++) {
-          ctx.fillStyle = (ti % 2 === 0) ? '#3a3a3a' : '#2a2a2a';
-          ctx.fillRect(ux - ts + ti * (ts * 2 / 6) + treadAnim, uy + 2, ts * 2 / 6 - 1, 5);
-        }
-        ctx.fillStyle = td;
-        ctx.fillRect(ux - ts + 2, uy - 4, ts * 2 - 4, 7);
-        ctx.fillStyle = tc;
-        ctx.beginPath(); ctx.arc(ux, uy - 1, 8, 0, Math.PI * 2); ctx.fill();
-        ctx.save();
-        ctx.translate(ux, uy - 1);
-        ctx.rotate(e.turretDir);
-        ctx.fillStyle = '#222';
-        ctx.fillRect(-1, -2, ts + 4, 4);
-        ctx.restore();
-        ctx.fillStyle = '#333';
-        ctx.beginPath(); ctx.arc(ux, uy - 1, 3.5, 0, Math.PI * 2); ctx.fill();
-        if (e.type === 'heavyTank') {
-          ctx.fillStyle = 'rgba(0,0,0,0.3)';
-          ctx.fillRect(ux - ts + 2, uy - 8, ts * 2 - 4, 5);
-        }
-      } else if (e.type === 'arty') {
+      if (e.type === 'arty') {
         ctx.fillStyle = '#222'; ctx.fillRect(ux - 11, uy + 1, 22, 7);
         ctx.fillStyle = td; ctx.fillRect(ux - 9, uy - 5, 18, 8);
         ctx.fillStyle = tc; ctx.fillRect(ux - 6, uy - 7, 12, 5);
@@ -685,19 +858,6 @@ export class Renderer {
         ctx.translate(ux, uy - 3);
         ctx.rotate(e.turretDir - 0.3);
         ctx.fillRect(0, -2, 20, 4);
-        ctx.restore();
-      } else if (e.type === 'mlrs') {
-        ctx.fillStyle = '#222'; ctx.fillRect(ux - 11, uy + 1, 22, 7);
-        ctx.fillStyle = td; ctx.fillRect(ux - 10, uy - 5, 20, 8);
-        ctx.fillStyle = tc; ctx.fillRect(ux - 8, uy - 7, 16, 5);
-        // Rocket pods
-        ctx.fillStyle = '#1a1a1a';
-        ctx.save();
-        ctx.translate(ux, uy - 3);
-        ctx.rotate(e.turretDir);
-        for (var rt = 0; rt < 3; rt++) {
-          ctx.fillRect(2, rt * 3 - 4, 9, 2);
-        }
         ctx.restore();
       } else if (e.type2 === 'harvester') {
         ctx.fillStyle = '#333'; ctx.fillRect(ux - 11, uy + 1, 22, 7);
@@ -710,11 +870,193 @@ export class Renderer {
           ctx.fillStyle = '#f1c40f';
           ctx.fillRect(ux - 14, uy + 8 - oh, 2, oh);
         }
-      } else if (e.type === 'apc') {
-        ctx.fillStyle = '#222'; ctx.fillRect(ux - 11, uy + 1, 22, 7);
-        ctx.fillStyle = td; ctx.fillRect(ux - 10, uy - 6, 20, 8);
-        ctx.fillStyle = tc; ctx.fillRect(ux - 8, uy - 8, 16, 5);
-        ctx.fillStyle = '#5d6d7e'; ctx.fillRect(ux + 6, uy - 4, 7, 3);
+      } else if (e.type === 'grizzly') {
+        // 灰熊坦克 - 盟军主战坦克
+        var ts = 12;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(ux - ts, uy + 2, ts * 2, 6);
+        ctx.fillStyle = tc;
+        ctx.fillRect(ux - ts + 1, uy - 3, ts * 2 - 2, 7);
+        ctx.fillStyle = '#ecf0f1';
+        ctx.beginPath(); ctx.arc(ux, uy, 7, 0, Math.PI * 2); ctx.fill();
+        ctx.save();
+        ctx.translate(ux, uy);
+        ctx.rotate(e.turretDir);
+        ctx.fillStyle = '#34495e';
+        ctx.fillRect(0, -2, ts + 6, 4);
+        ctx.restore();
+      } else if (e.type === 'rhino') {
+        // 犀牛坦克 - 苏联主战坦克
+        var ts = 13;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(ux - ts, uy + 2, ts * 2, 7);
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(ux - ts + 1, uy - 4, ts * 2 - 2, 8);
+        ctx.fillStyle = '#c0392b';
+        ctx.beginPath(); ctx.arc(ux, uy - 1, 8, 0, Math.PI * 2); ctx.fill();
+        ctx.save();
+        ctx.translate(ux, uy - 1);
+        ctx.rotate(e.turretDir);
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(0, -2.5, ts + 5, 5);
+        ctx.restore();
+      } else if (e.type === 'apocalypse') {
+        // 天启坦克 - 苏联终极坦克
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(ux - 16, uy + 3, 32, 8);
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(ux - 14, uy - 5, 28, 10);
+        ctx.fillStyle = '#c0392b';
+        ctx.beginPath(); ctx.arc(ux, uy - 1, 10, 0, Math.PI * 2); ctx.fill();
+        // 双炮管
+        ctx.save();
+        ctx.translate(ux, uy - 3);
+        ctx.rotate(e.turretDir);
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(0, -4, 16, 3);
+        ctx.fillRect(0, 1, 16, 3);
+        ctx.restore();
+      } else if (e.type === 'prism') {
+        // 光棱坦克
+        ctx.fillStyle = '#222';
+        ctx.fillRect(ux - 10, uy + 2, 20, 6);
+        ctx.fillStyle = '#9b59b6';
+        ctx.fillRect(ux - 9, uy - 3, 18, 7);
+        ctx.save();
+        ctx.translate(ux, uy);
+        ctx.rotate(e.turretDir);
+        // 光棱发射器
+        ctx.fillStyle = '#e91e63';
+        ctx.fillRect(0, -3, 14, 6);
+        ctx.fillStyle = '#f8bbd9';
+        ctx.fillRect(8, -1.5, 4, 3);
+        ctx.restore();
+      } else if (e.type === 'v3') {
+        // V3火箭车
+        ctx.fillStyle = '#222';
+        ctx.fillRect(ux - 11, uy + 2, 22, 6);
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(ux - 10, uy - 3, 20, 7);
+        ctx.save();
+        ctx.translate(ux, uy - 2);
+        ctx.rotate(e.turretDir - 0.5);
+        ctx.fillStyle = '#c0392b';
+        ctx.fillRect(0, -2, 18, 4);
+        // 火箭
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillRect(14, -1.5, 8, 3);
+        ctx.restore();
+      } else if (e.type === 'ifv') {
+        // 多功能步兵车
+        ctx.fillStyle = '#222';
+        ctx.fillRect(ux - 9, uy + 2, 18, 5);
+        ctx.fillStyle = tc;
+        ctx.fillRect(ux - 8, uy - 3, 16, 6);
+        ctx.save();
+        ctx.translate(ux, uy);
+        ctx.rotate(e.turretDir);
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(0, -1.5, 10, 3);
+        ctx.restore();
+      } else if (e.type === 'flakTrack') {
+        // 防空履带车
+        ctx.fillStyle = '#222';
+        ctx.fillRect(ux - 10, uy + 2, 20, 6);
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(ux - 9, uy - 3, 18, 7);
+        ctx.save();
+        ctx.translate(ux, uy);
+        ctx.rotate(e.turretDir);
+        ctx.fillStyle = '#8e44ad';
+        ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillRect(0, -2, 10, 4);
+        ctx.restore();
+      } else if (e.type === 'mirage') {
+        // 幻影坦克 - 伪装成树
+        if (e.stealthActive && e.team !== TEAM_PLAYER) {
+          // 伪装成树
+          ctx.fillStyle = '#2d5016';
+          ctx.beginPath();
+          ctx.moveTo(ux, uy - 15);
+          ctx.lineTo(ux + 8, uy + 5);
+          ctx.lineTo(ux - 8, uy + 5);
+          ctx.fill();
+          ctx.fillStyle = '#5d4037';
+          ctx.fillRect(ux - 2, uy + 5, 4, 6);
+        } else {
+          ctx.fillStyle = '#27ae60';
+          ctx.fillRect(ux - 10, uy + 2, 20, 6);
+          ctx.save();
+          ctx.translate(ux, uy);
+          ctx.rotate(e.turretDir);
+          ctx.fillStyle = '#2ecc71';
+          ctx.fillRect(0, -2, 14, 4);
+          ctx.restore();
+        }
+      } else if (e.type === 'warMiner') {
+        // 苏联武装采矿车
+        ctx.fillStyle = '#333';
+        ctx.fillRect(ux - 12, uy + 2, 24, 7);
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(ux - 12, uy - 4, 24, 8);
+        ctx.fillStyle = '#c0392b';
+        ctx.beginPath(); ctx.arc(ux, uy - 1, 7, 0, Math.PI * 2); ctx.fill();
+        // 机枪
+        ctx.save();
+        ctx.translate(ux + 8, uy - 2);
+        ctx.rotate(e.turretDir);
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(0, -1, 8, 2);
+        ctx.restore();
+        if (e.ore > 0) {
+          var oh = Math.min(7, (e.ore / e.capacity) * 7);
+          ctx.fillStyle = '#f1c40f';
+          ctx.fillRect(ux - 10, uy + 7 - oh, 3, oh);
+        }
+      }
+    } else if (e.isAirUnit) {
+      // 空军单位渲染
+      if (e.type2 === TYPE_AIRCRAFT) {
+        // 战机
+        ctx.fillStyle = tc;
+        ctx.beginPath();
+        ctx.moveTo(ux + 12, uy);
+        ctx.lineTo(ux - 8, uy - 8);
+        ctx.lineTo(ux - 5, uy);
+        ctx.lineTo(ux - 8, uy + 8);
+        ctx.fill();
+        // 机翼
+        ctx.fillStyle = td;
+        ctx.beginPath();
+        ctx.moveTo(ux, uy);
+        ctx.lineTo(ux - 5, uy - 12);
+        ctx.lineTo(ux + 3, uy);
+        ctx.lineTo(ux - 5, uy + 12);
+        ctx.fill();
+      } else if (e.type2 === TYPE_HELICOPTER) {
+        // 直升机
+        ctx.fillStyle = tc;
+        ctx.fillRect(ux - 10, uy - 4, 20, 8);
+        // 旋翼
+        ctx.fillStyle = '#333';
+        var rotorOffset = Math.sin(frameCount * 0.5) * 2;
+        ctx.fillRect(ux - 12, uy - 6 + rotorOffset, 24, 2);
+        // 尾翼
+        ctx.fillStyle = td;
+        ctx.fillRect(ux - 14, uy - 2, 6, 4);
+      } else if (e.type2 === TYPE_AIRSHIP) {
+        // 基洛夫空艇
+        ctx.fillStyle = '#c0392b';
+        ctx.beginPath();
+        ctx.ellipse(ux, uy, 20, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 吊舱
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(ux - 8, uy + 8, 16, 8);
+        // 螺旋桨
+        ctx.fillStyle = '#333';
+        var propOffset = Math.sin(frameCount * 0.3) * 3;
+        ctx.fillRect(ux - 15, uy - 12 + propOffset, 30, 2);
       }
     }
 
@@ -788,9 +1130,22 @@ export class Renderer {
 
     minimapCtx.drawImage(this.minimapTerrainCanvas, 0, 0);
 
+    // 战争迷雾覆盖小地图（未探索全黑 / 已探索半暗）
+    if (gameState.fogOfWar) {
+      gameState.fogOfWar.render(minimapCtx, mw, mh);
+    }
+
     for (var i = 0; i < gameState.entities.length; i++) {
       var e = gameState.entities[i];
       if (e.dead) continue;
+      
+      // 战争迷雾：小地图上敌方单位只在有视野时显示
+      if (gameState.fogOfWar && e.team !== TEAM_PLAYER) {
+        var eCenterX = Math.floor(e.x + (e.isBuilding ? e.size / 2 : 0.5));
+        var eCenterY = Math.floor(e.y + (e.isBuilding ? e.size / 2 : 0.5));
+        if (!gameState.fogOfWar.isVisible(eCenterX, eCenterY)) continue;
+      }
+      
       minimapCtx.fillStyle = e.team === TEAM_PLAYER ? '#4a9fd4' : '#e74c3c';
       var emx = (e.x + (e.isBuilding ? e.size / 2 : 0.5)) * sx;
       var emy = (e.y + (e.isBuilding ? e.size / 2 : 0.5)) * sy;
@@ -818,58 +1173,5 @@ export class Renderer {
     var vpW = viewWidth / camera.zoom / TILE_SIZE * sx;
     var vpH = this.canvas.height / camera.zoom / TILE_SIZE * sy;
     minimapCtx.strokeRect(vpX, vpY, vpW, vpH);
-  }
-
-  drawBuildIcon(c, type, def) {
-    c.fillStyle = '#0a0a14';
-    c.fillRect(0, 0, 44, 44);
-    if (BUILDING_DEFS[type] || DEFENSE_DEFS[type]) {
-      c.fillStyle = COLOR_PLAYER_DARK;
-      c.fillRect(4, 4, 36, 36);
-      c.fillStyle = COLOR_PLAYER;
-      c.fillRect(6, 6, 32, 32);
-      c.fillStyle = def.icon;
-      c.fillRect(10, 10, 24, 24);
-      if (type === 'powerPlant') {
-        c.fillStyle = '#fff'; c.font = 'bold 16px Arial'; c.textAlign = 'center';
-        c.fillText('\u26A1', 22, 28);
-      } else if (type === 'refinery') {
-        c.fillStyle = '#fff'; c.font = 'bold 14px Arial'; c.textAlign = 'center';
-        c.fillText('$', 22, 28);
-      } else if (type === 'barracks') {
-        c.fillStyle = '#fff'; c.font = 'bold 12px Arial'; c.textAlign = 'center';
-        c.fillText('\u5175', 22, 27);
-      } else if (type === 'warFactory') {
-        c.fillStyle = '#fff'; c.font = 'bold 12px Arial'; c.textAlign = 'center';
-        c.fillText('\u8F66', 22, 27);
-      } else if (type === 'radar') {
-        c.fillStyle = '#fff'; c.font = 'bold 14px Arial'; c.textAlign = 'center';
-        c.fillText('\u25C9', 22, 28);
-      } else if (type === 'techCenter') {
-        c.fillStyle = '#fff'; c.font = 'bold 12px Arial'; c.textAlign = 'center';
-        c.fillText('\u79D1', 22, 27);
-      } else if (type === 'tesla') {
-        c.fillStyle = '#fff'; c.font = 'bold 14px Arial'; c.textAlign = 'center';
-        c.fillText('\u26A1', 22, 28);
-      }
-    } else {
-      c.fillStyle = '#1a2a3a';
-      c.fillRect(4, 4, 36, 36);
-      c.fillStyle = def.icon;
-      if (def.type === 'infantry') {
-        c.fillRect(18, 12, 8, 12);
-        c.beginPath(); c.arc(22, 10, 3, 0, Math.PI * 2); c.fill();
-        c.fillRect(17, 24, 4, 10);
-        c.fillRect(23, 24, 4, 10);
-      } else if (def.type === 'harvester') {
-        c.fillRect(8, 16, 28, 14);
-        c.fillStyle = '#f1c40f'; c.fillRect(4, 18, 6, 10);
-      } else {
-        c.fillRect(8, 18, 28, 14);
-        c.fillStyle = def.icon; c.beginPath(); c.arc(22, 22, 7, 0, Math.PI * 2); c.fill();
-        c.fillStyle = '#222'; c.fillRect(22, 20, 12, 4);
-      }
-    }
-    c.textAlign = 'left';
   }
 }

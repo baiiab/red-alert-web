@@ -1,5 +1,7 @@
 # 红警网页复刻版
 
+[English](README.en.md) | 中文
+
 > ## ⚠️ 免责声明 / Disclaimer
 >
 > **本项目是非官方的个人学习作品，与 Electronic Arts Inc. 没有任何关系。**

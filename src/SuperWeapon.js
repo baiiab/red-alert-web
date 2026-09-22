@@ -1,5 +1,11 @@
 import { SUPER_WEAPONS } from './definitions.js';
-import { TILE_SIZE, TEAM_PLAYER } from './constants.js';
+import { TILE_SIZE, TEAM_PLAYER, FPS } from './constants.js';
+
+/** 定义里的冷却是秒，管理器内部按帧计时，这里统一换算 */
+function cooldownFrames(def) {
+  const sec = def.cooldownSec !== undefined ? def.cooldownSec : 90;
+  return sec * FPS;
+}
 
 /**
  * 超级武器管理器
@@ -30,7 +36,7 @@ export class SuperWeaponManager {
     const weapon = {
       type: type,
       ready: false,
-      cooldown: def.cooldown,
+      cooldown: cooldownFrames(def),
       timer: 0,
       target: null
     };
@@ -41,6 +47,42 @@ export class SuperWeaponManager {
       this.enemySuperWeapons.set(type, weapon);
     }
     return true;
+  }
+
+  /**
+   * 注销超级武器。建筑被摧毁/变卖后必须调用，否则超武会继续充能并可用。
+   */
+  removeSuperWeapon(type, team) {
+    const map = team === TEAM_PLAYER ? this.playerSuperWeapons : this.enemySuperWeapons;
+    const removed = map.delete(type);
+    // 超时空传送：若正处于「选择目的地」状态，传送仪被拆时必须一并取消，
+    // 否则玩家会卡在瞄准模式里无法操作
+    if (type === 'chrono') {
+      for (let i = this.activeEffects.length - 1; i >= 0; i--) {
+        const ef = this.activeEffects[i];
+        if (ef.type === 'chronoPending' && ef.team === team) {
+          this.activeEffects.splice(i, 1);
+          if (this.onChronoExpired) this.onChronoExpired(team);
+        }
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * 以「当前存活的发射建筑」为准同步超武集合：
+   * 缺的补上、多的（建筑已被拆）注销。由主循环的建筑扫描定期调用。
+   * @param {Set<string>} activePlayer 玩家侧仍存活的超武类型
+   * @param {Set<string>} activeEnemy  敌方侧仍存活的超武类型
+   */
+  syncActive(activePlayer, activeEnemy) {
+    // Map.keys() 的迭代器在迭代中删除当前项是安全的，无需先 Array.from 拷一份
+    for (const type of this.playerSuperWeapons.keys()) {
+      if (!activePlayer.has(type)) this.removeSuperWeapon(type, TEAM_PLAYER);
+    }
+    for (const type of this.enemySuperWeapons.keys()) {
+      if (!activeEnemy.has(type)) this.removeSuperWeapon(type, 1);
+    }
   }
 
   /**
@@ -151,12 +193,13 @@ export class SuperWeaponManager {
 
     // 找到范围内的友方单位
     const range = 3; // 3格范围
+    const range2 = range * range;
     let affected = 0;
     for (const entity of this.gameState.entities) {
       if (entity.team === team && !entity.dead && !entity.isBuilding) {
         const dx = entity.x - targetX;
         const dy = entity.y - targetY;
-        if (Math.hypot(dx, dy) <= range) {
+        if (dx * dx + dy * dy <= range2) {
           // 给予无敌效果
           if (!entity.ironCurtain) this._statusCount++;
           entity.ironCurtain = def.duration;
@@ -185,13 +228,14 @@ export class SuperWeaponManager {
   chronoShift(targetX, targetY, team) {
     // 选择范围内的单位进行传送
     const range = 2;
+    const range2 = range * range;
     const targets = [];
 
     for (const entity of this.gameState.entities) {
       if (entity.team === team && !entity.dead && !entity.isBuilding) {
         const dx = entity.x - targetX;
         const dy = entity.y - targetY;
-        if (Math.hypot(dx, dy) <= range) {
+        if (dx * dx + dy * dy <= range2) {
           targets.push(entity);
         }
       }
@@ -369,8 +413,8 @@ export class SuperWeaponManager {
       if (entity.team !== team && !entity.dead) {
         const dx = entity.x - x;
         const dy = entity.y - y;
-        const dist = Math.hypot(dx, dy);
-        if (dist < minDist && dist <= 3) {
+        const dist = dx * dx + dy * dy; // 只比远近与阈值，平方即可
+        if (dist < minDist && dist <= 9) {
           minDist = dist;
           target = entity;
         }
@@ -513,7 +557,7 @@ export class SuperWeaponManager {
         map.set(item.type, {
           type: item.type,
           ready: !!item.ready,
-          cooldown: def.cooldown,
+          cooldown: cooldownFrames(def),
           timer: item.timer || 0,
           target: null
         });

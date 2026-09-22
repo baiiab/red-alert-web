@@ -1,5 +1,5 @@
 import { TILE_SIZE, TYPE_AIRCRAFT, TYPE_HELICOPTER, TYPE_AIRSHIP } from './constants.js';
-import { BUILDING_DEFS, DEFENSE_DEFS, UNIT_DEFS, DAMAGE_TYPES } from './definitions.js';
+import { BUILDING_DEFS, DEFENSE_DEFS, UNIT_DEFS, DAMAGE_TYPES, ARMOR_BY_TYPE, DAMAGE_BY_TYPE, DEFAULT_ARMOR_BY_CATEGORY, DEFAULT_DAMAGE_BY_CATEGORY } from './definitions.js';
 
 let entityCounter = 0;
 
@@ -73,16 +73,27 @@ export class Entity {
     
     // 阵营
     this.faction = (def && def.faction) || null;
-    
-    // 装甲类型
-    this.armorType = (def && def.armorType) || 'light';
-    
-    // 伤害类型
-    this.damageType = (def && def.damageType) || 'cannon';
-    if (def && def.laser) this.damageType = 'laser';
-    if (def && def.missile) this.damageType = 'missile';
-    if (def && def.torpedo) this.damageType = 'torpedo';
-    if (def && def.bomb) this.damageType = 'bomb';
+
+    // 兵种键：建筑的 def.type2 是空串，需要单独映射到 building/defense
+    var catKey = this.isBuilding
+      ? (this.category === 'defenses' ? 'defense' : 'building')
+      : this.type2;
+
+    // 装甲类型：定义里显式声明 > 分配表 > 按兵种兜底。
+    // 这里原来一律退回 'light'，于是建筑、步兵全算轻甲 ——
+    // 红警2 的相克关系（步枪打不动坦克、炮弹才砸得动建筑）整个不成立
+    this.armorType = (def && def.armorType) || ARMOR_BY_TYPE[type] ||
+      DEFAULT_ARMOR_BY_CATEGORY[catKey] || 'medium';
+
+    // 伤害类型：显式声明 > 分配表 > laser/missile 等标志 > 按兵种兜底。
+    // 原默认值写死 'cannon'，所以步枪兵打出的是炮弹的弹道和炮声
+    //（弹道类型由 damageType 推导，见 main.js 的 performAttack）
+    this.damageType = (def && def.damageType) || DAMAGE_BY_TYPE[type] ||
+      ((def && def.laser) ? 'laser' :
+       (def && def.missile) ? 'missile' :
+       (def && def.torpedo) ? 'torpedo' :
+       (def && def.bomb) ? 'bomb' :
+       DEFAULT_DAMAGE_BY_CATEGORY[catKey] || 'cannon');
     
     // 空军相关
     this.isAirUnit = this.type2 === TYPE_AIRCRAFT || this.type2 === TYPE_HELICOPTER || this.type2 === TYPE_AIRSHIP;

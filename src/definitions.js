@@ -115,32 +115,102 @@ export const UNIT_DEFS = {
 };
 
 // ==================== 装甲类型定义 ====================
+// 键为装甲类型，值为「该装甲对各类攻击者的抗性」——仅用于 UI 展示与调参参考；
+// 实际伤害倍率取的是 DAMAGE_TYPES[攻击方伤害类型][目标装甲类型]（见 Entity.calculateDamage）
 export const ARMOR_TYPES = {
-  none:     { name: '无装甲',   infantry: 1.0, vehicle: 1.0, aircraft: 1.0, naval: 1.0 },
-  light:    { name: '轻甲',     infantry: 0.8, vehicle: 1.2, aircraft: 1.0, naval: 1.0 },
-  medium:   { name: '中甲',     infantry: 0.6, vehicle: 1.0, aircraft: 0.8, naval: 0.8 },
-  heavy:    { name: '重甲',     infantry: 0.4, vehicle: 0.8, aircraft: 0.6, naval: 0.6 },
-  concrete: { name: '混凝土',   infantry: 0.2, vehicle: 0.5, aircraft: 0.4, naval: 0.4 },
-  steel:    { name: '钢铁',     infantry: 0.1, vehicle: 0.3, aircraft: 0.3, naval: 0.3 },
+  none:     { name: '无装甲',   desc: '步兵等无装甲目标' },
+  light:    { name: '轻甲',     desc: '轻型车辆、飞机' },
+  medium:   { name: '中甲',     desc: '主战坦克、舰船' },
+  heavy:    { name: '重甲',     desc: '重型坦克、重型舰船' },
+  concrete: { name: '混凝土',   desc: '普通建筑' },
+  steel:    { name: '钢铁',     desc: '加固建筑、城墙' },
 };
 
 // ==================== 伤害类型定义 ====================
+// 行 = 攻击方伤害类型，列 = 目标装甲类型。none 列不可省：
+// 缺了会走 calculateDamage 的 1.0 兜底，相当于「对着步兵和对着空气一样」，
+// 子弹能秒步兵、炮弹砸不动步兵这些差异就全没了。
 export const DAMAGE_TYPES = {
-  bullet:   { name: '子弹',     light: 1.0, medium: 0.7, heavy: 0.4, concrete: 0.2, steel: 0.1 },
-  cannon:   { name: '炮弹',     light: 1.2, medium: 1.0, heavy: 0.8, concrete: 0.6, steel: 0.4 },
-  rocket:   { name: '火箭',     light: 0.8, medium: 1.0, heavy: 1.0, concrete: 0.8, steel: 0.6 },
-  missile:  { name: '导弹',     light: 1.0, medium: 1.0, heavy: 1.0, concrete: 1.0, steel: 0.8 },
-  laser:    { name: '激光',     light: 1.0, medium: 1.0, heavy: 0.8, concrete: 0.6, steel: 0.5 },
-  electric: { name: '电击',     light: 1.0, medium: 0.9, heavy: 0.9, concrete: 0.5, steel: 0.3 },
-  bomb:     { name: '炸弹',     light: 1.0, medium: 1.0, heavy: 1.0, concrete: 1.2, steel: 1.0 },
-  torpedo:  { name: '鱼雷',     light: 0.0, medium: 0.0, heavy: 0.0, concrete: 0.0, steel: 0.0, naval: 1.5 },
+  bullet:   { name: '子弹',   none: 1.0, light: 1.0, medium: 0.7, heavy: 0.4, concrete: 0.2, steel: 0.1 },
+  cannon:   { name: '炮弹',   none: 1.0, light: 1.2, medium: 1.0, heavy: 0.8, concrete: 0.6, steel: 0.4 },
+  rocket:   { name: '火箭',   none: 0.8, light: 0.8, medium: 1.0, heavy: 1.0, concrete: 0.8, steel: 0.6 },
+  missile:  { name: '导弹',   none: 1.0, light: 1.0, medium: 1.0, heavy: 1.0, concrete: 1.0, steel: 0.8 },
+  laser:    { name: '激光',   none: 1.0, light: 1.0, medium: 1.0, heavy: 0.8, concrete: 0.6, steel: 0.5 },
+  electric: { name: '电击',   none: 1.0, light: 1.0, medium: 0.9, heavy: 0.9, concrete: 0.5, steel: 0.3 },
+  bomb:     { name: '炸弹',   none: 1.0, light: 1.0, medium: 1.0, heavy: 1.0, concrete: 1.2, steel: 1.0 },
+  torpedo:  { name: '鱼雷',   none: 0.0, light: 0.0, medium: 0.0, heavy: 0.0, concrete: 0.0, steel: 0.0, naval: 1.5 },
+};
+
+// ==================== 装甲 / 伤害类型分配表 ====================
+// 逐个条目标注，比往每行定义里塞字段更好读，也便于一眼看出相克关系是否合理。
+// Entity 里仍有按兵种兜底（见 DEFAULT_ARMOR_BY_CATEGORY），但那是保险，不是常规路径。
+//
+// 设计要点（对应红警2 手感）：
+//   建筑 = concrete/steel，步枪几乎打不动，炮兵/炸弹才有效
+//   步兵 = none，炮弹的 1.0 倍率不再被 0.6 之类削弱，但子弹专杀步兵
+//   坦克 = medium/heavy，子弹倍率 0.7/0.4 —— 步枪打坦克挠痒痒
+export const ARMOR_BY_TYPE = {
+  // --- 建筑 ---
+  base: 'steel', powerPlant: 'concrete', refinery: 'concrete', barracks: 'concrete',
+  warFactory: 'concrete', radar: 'concrete', repairBay: 'concrete',
+  alliedTech: 'concrete', orePurifier: 'concrete', sovietTech: 'concrete',
+  ironCurtain: 'steel', nukeSilo: 'steel', weatherControl: 'steel', chronosphere: 'steel',
+  // --- 防御建筑 ---
+  wall: 'steel', pillbox: 'concrete', prismTower: 'concrete', patriot: 'concrete',
+  tesla: 'concrete', flakCannon: 'concrete', turret: 'steel',
+  // --- 步兵（一律无装甲，靠血量和机动存活）---
+  infantry: 'none', conscript: 'none', rocket: 'none', flakTrooper: 'none',
+  engineer: 'none', spy: 'none', tanya: 'none', attackDog: 'none', crazyIvan: 'none',
+  // --- 车辆 ---
+  harvester: 'light', warMiner: 'medium', grizzly: 'medium', rhino: 'heavy',
+  apocalypse: 'heavy', mirage: 'light', prism: 'light', v3: 'light',
+  ifv: 'light', flakTrack: 'medium', arty: 'light',
+  // --- 空军 ---
+  harrier: 'light', blackEagle: 'light', mig: 'light',
+  longbow: 'light', hind: 'light', kirov: 'heavy',
+  // --- 海军 ---
+  destroyer: 'medium', aegis: 'medium', submarine: 'light', dreadnought: 'heavy',
+};
+
+export const DAMAGE_BY_TYPE = {
+  // --- 步兵 ---
+  infantry: 'bullet', conscript: 'bullet', attackDog: 'bullet', tanya: 'bullet',
+  rocket: 'rocket', flakTrooper: 'rocket',
+  // --- 车辆 ---
+  grizzly: 'cannon', rhino: 'cannon', apocalypse: 'cannon', mirage: 'cannon', arty: 'cannon',
+  warMiner: 'bullet', ifv: 'bullet', flakTrack: 'bullet',
+  prism: 'laser', v3: 'missile',
+  // --- 空军 ---
+  harrier: 'missile', blackEagle: 'missile', mig: 'missile', longbow: 'missile',
+  hind: 'bullet', kirov: 'bomb',
+  // --- 海军 ---
+  destroyer: 'cannon', aegis: 'missile', submarine: 'torpedo', dreadnought: 'missile',
+  // --- 防御建筑 ---
+  pillbox: 'bullet', flakCannon: 'bullet', prismTower: 'laser',
+  patriot: 'missile', tesla: 'electric', turret: 'cannon',
+};
+
+// 兜底：定义表里漏标时按兵种给合理默认，避免又退回「建筑算轻甲、步枪算炮弹」
+export const DEFAULT_ARMOR_BY_CATEGORY = {
+  infantry: 'none', vehicle: 'medium', harvester: 'medium',
+  aircraft: 'light', helicopter: 'light', airship: 'light', naval: 'medium',
+  building: 'concrete', defense: 'concrete',
+};
+export const DEFAULT_DAMAGE_BY_CATEGORY = {
+  infantry: 'bullet', vehicle: 'cannon', harvester: 'bullet',
+  aircraft: 'missile', helicopter: 'missile', airship: 'bomb', naval: 'cannon',
+  building: 'cannon', defense: 'cannon',
 };
 
 // ==================== 超级武器定义 ====================
+// 冷却是「秒」，不是帧！管理器会乘 FPS 换算。
+// 曾经这里写成 cooldown: 600 并注释「10分钟（以帧计）」，但实际按帧递减，
+// 600 帧 = 10 秒 —— 敌方发射井建成后每 10 秒一颗核弹，等于核弹雨。
+// 字段名带 Sec 就是为了让单位无法被误读。
 export const SUPER_WEAPONS = {
   nuke: {
     name: '核弹攻击',
-    cooldown: 600, // 10分钟（以帧计，假设60fps）
+    cooldownSec: 90,
     damage: 1000,
     radius: 5,
     description: '发射核弹摧毁目标区域',
@@ -148,7 +218,7 @@ export const SUPER_WEAPONS = {
   },
   lightningStorm: {
     name: '闪电风暴',
-    cooldown: 600,
+    cooldownSec: 90,
     damage: 150,
     radius: 6,
     duration: 180, // 3秒
@@ -157,14 +227,14 @@ export const SUPER_WEAPONS = {
   },
   ironCurtain: {
     name: '铁幕',
-    cooldown: 480, // 8分钟
+    cooldownSec: 90,
     duration: 300, // 5秒无敌
     description: '使单位无敌',
     faction: FACTION_SOVIET
   },
   chrono: {
     name: '超时空传送',
-    cooldown: 300, // 5分钟
+    cooldownSec: 90,
     description: '瞬间传送单位',
     faction: FACTION_ALLIED
   }

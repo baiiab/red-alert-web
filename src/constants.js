@@ -1,6 +1,9 @@
 export const TILE_SIZE = 32;
 export const MAP_WIDTH = 72;
 export const MAP_HEIGHT = 72;
+// 每秒帧数。冷却/建造/生产计时一律按帧存放（timer++），
+// 所以凡是「秒」的定义都必须 × FPS 换算，否则会差 60 倍。
+export const FPS = 60;
 export const GRASS = 0, WATER = 1, ORE = 2, ROCK = 3, CONCRETE = 4, SAND = 5, TREE = 6;
 export const TEAM_PLAYER = 0, TEAM_ENEMY = 1;
 

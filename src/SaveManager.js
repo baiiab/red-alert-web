@@ -11,7 +11,9 @@ const PERSISTED_FIELDS = [
   'animFrame', 'built', 'buildProgress', 'buildTime', 'producing', 'produceProgress',
   'ore', 'capacity', 'returningToRefinery', 'power', 'powerUse', 'cost', 'icon', 'desc',
   'veterancy', 'kills', 'ironCurtain', 'chronoStun', 'invulnerable',
-  'faction', 'z', 'ammo', 'maxAmmo', 'returningToBase', 'harvestTimer', 'selected'
+  'faction', 'z', 'ammo', 'maxAmmo', 'returningToBase', 'harvestTimer', 'selected',
+  // 出厂单位赴集结点标记：漏掉会让读档后单位停在原地不再转守卫
+  'autoGuard'
 ];
 // {x, y} 坐标点字段
 const POINT_FIELDS = ['harvestTarget', 'rallyPoint', 'attackMoveTarget', 'guardPos'];
@@ -168,7 +170,10 @@ export class SaveManager {
         if (ed.id > Entity.counter) Entity.counter = ed.id;
         entityMap[ed.id] = e;
         gameState.entities.push(e);
-        if (e.isBuilding && e.built) gameState.map.setOccupancy(e);
+        // 占用必须对所有建筑恢复，不能只恢复已完工的：
+        // 在建建筑同样占格（spawnEntity 无条件 setOccupancy），漏掉会让读档后
+        // 该建筑可被单位穿过、也能在上面叠建，且完工分支也不会补上
+        if (e.isBuilding) gameState.map.setOccupancy(e);
       }
       for (var ai = 0; ai < gameState.entities.length; ai++) {
         var ae = gameState.entities[ai];

@@ -5,8 +5,14 @@ body {
   user-select: none; color: #ccc;
 }
 
-/* 红色警戒风格字体 */
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
+/* 红色警戒风格字体
+   这里原本有一行 @import 引 Google Fonts 的 Orbitron，已删除，原因有二：
+   1. @import 写在 *{} / body{} 之后，按 CSS 规范属于位置非法 —— 浏览器直接忽略，
+      那行字从来没生效过。
+   2. 字体托管在 fonts.googleapis.com，在国内访问不到的分享链接上只会多一次
+      必然失败的请求（还阻塞渲染）。
+   因此改为纯本地字体栈：装了 Orbitron 就用，没装就退回微软雅黑 ——
+   与删除前的实际渲染结果完全一致。 */
 
 /* 红色警戒主题色 */
 :root {

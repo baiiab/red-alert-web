@@ -1,4 +1,4 @@
-import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, TEAM_PLAYER, TEAM_ENEMY, GRASS, WATER, ORE, SAND, CONCRETE, TREE } from './constants.js';
+import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, TEAM_PLAYER, TEAM_ENEMY, GRASS, WATER, ORE, SAND, CONCRETE, TREE, FPS } from './constants.js';
 import { BUILDING_DEFS, DEFENSE_DEFS, UNIT_DEFS } from './definitions.js';
 import { Entity } from './Entity.js';
 import { GameState } from './GameState.js';
@@ -29,6 +29,12 @@ let frameCount = 0;
 let gameRunning = false, gamePaused = false, gameSpeed = 1;
 let activeAction = null;
 let notifTimer = 0;
+let lastFrameTime = 0, simulationAccumulator = 0;
+
+// 模拟固定为 60Hz，渲染刷新率不再改变移动、建造和冷却速度。
+const SIM_STEP_MS = 1000 / FPS;
+const MAX_FRAME_DELTA_MS = 250;
+const MAX_SIM_STEPS_PER_RENDER = 15;
 
 // 超武存活集合：每次建筑扫描前 clear 后复用，避免创建新对象。
 // 用途是反向注销——建筑被拆后对应超武必须从管理器里移除。
@@ -66,6 +72,8 @@ function startGame(diff) {
   gameSpeed = 1;
   activeAction = null;
   notifTimer = 0;
+  lastFrameTime = 0;
+  simulationAccumulator = 0;
   document.getElementById('startScreen').style.display = 'none';
   document.getElementById('gameOver').style.display = 'none';
   renderer = new Renderer(canvas, minimapCanvas);
@@ -131,7 +139,7 @@ function startGame(diff) {
   window.__ui = ui;
   ui.renderGroupBar(gameState);
   ui.updateBuildList(gameState);
-  gameLoop();
+  gameLoop(performance.now());
 }
 
 function wireSuperWeaponCallbacks(swm) {
@@ -160,12 +168,19 @@ function wireSuperWeaponCallbacks(swm) {
   };
 }
 
-function gameLoop() {
+function gameLoop(timestamp) {
   if (!gameRunning) return;
+  var now = typeof timestamp === 'number' ? timestamp : performance.now();
+  var elapsed = lastFrameTime ? now - lastFrameTime : 0;
+  lastFrameTime = now;
+  elapsed = Math.max(0, Math.min(MAX_FRAME_DELTA_MS, elapsed));
+
   if (!gamePaused) {
-    for (var s = 0; s < gameSpeed; s++) {
+    simulationAccumulator += elapsed * gameSpeed;
+    var steps = 0;
+    while (simulationAccumulator >= SIM_STEP_MS && steps < MAX_SIM_STEPS_PER_RENDER) {
+      simulationAccumulator -= SIM_STEP_MS;
       frameCount++;
-      updateCamera();
       updateEntities();
       updateProjectiles(gameState);
       updateExplosions(gameState);
@@ -176,11 +191,19 @@ function gameLoop() {
       updateEnemyAI();
       ui.updateNotification();
       checkGameOver();
-      if (gameState.gameOver) break;
+      steps++;
+      if (gameState.gameOver) { simulationAccumulator = 0; break; }
+    }
+    // 后台恢复或严重卡顿时丢弃过量欠帧，避免“越补越卡”的死亡螺旋。
+    if (steps === MAX_SIM_STEPS_PER_RENDER && simulationAccumulator >= SIM_STEP_MS) {
+      simulationAccumulator %= SIM_STEP_MS;
     }
   } else {
-    updateCamera();
+    simulationAccumulator = 0;
   }
+
+  // 镜头按真实经过时间移动，只更新一次，不随游戏速度或屏幕刷新率加倍。
+  updateCamera(elapsed / SIM_STEP_MS);
   ui.updateUI(gameState, gameStartTime, input ? input._callbacks.selectedUnits : selectedUnits,
     input ? input._callbacks.selectedBuilding : selectedBuilding, frameCount);
   ui.updateSuperWeapons(gameState, input ? input._callbacks.superWeaponTargeting : null, frameCount);
@@ -197,8 +220,9 @@ function gameLoop() {
   requestAnimationFrame(gameLoop);
 }
 
-function updateCamera() {
-  var speed = 12;
+function updateCamera(timeScale) {
+  var speed = 12 * timeScale;
+  var edgeSpeed = 10 * timeScale;
   var keys = input ? input.keys : {};
   if (keys['ArrowLeft']) camera.x -= speed;
   if (keys['ArrowRight']) camera.x += speed;
@@ -209,10 +233,10 @@ function updateCamera() {
   var viewH = canvas.height;
   var mouse = input ? input.mouse : { inCanvas: false, x: 0, y: 0 };
   if (mouse.inCanvas) {
-    if (mouse.x > 0 && mouse.x < edge && mouse.y > 44 && mouse.y < viewH) camera.x -= 10;
-    if (mouse.x > viewW - edge && mouse.x < viewW && mouse.y > 44 && mouse.y < viewH) camera.x += 10;
-    if (mouse.y > 44 && mouse.y < 44 + edge && mouse.x > 0 && mouse.x < viewW) camera.y -= 10;
-    if (mouse.y > viewH - edge && mouse.y < viewH && mouse.x > 0 && mouse.x < viewW) camera.y += 10;
+    if (mouse.x > 0 && mouse.x < edge && mouse.y > 44 && mouse.y < viewH) camera.x -= edgeSpeed;
+    if (mouse.x > viewW - edge && mouse.x < viewW && mouse.y > 44 && mouse.y < viewH) camera.x += edgeSpeed;
+    if (mouse.y > 44 && mouse.y < 44 + edge && mouse.x > 0 && mouse.x < viewW) camera.y -= edgeSpeed;
+    if (mouse.y > viewH - edge && mouse.y < viewH && mouse.x > 0 && mouse.x < viewW) camera.y += edgeSpeed;
   }
   var maxX = MAP_WIDTH * TILE_SIZE * camera.zoom - (canvas.width - 300);
   var maxY = MAP_HEIGHT * TILE_SIZE * camera.zoom - canvas.height;
@@ -252,10 +276,10 @@ function updateEntities() {
       gameState.addSmoke(e.getCenterX() + (Math.random() - 0.5) * 8, e.getCenterY() + (Math.random() - 0.5) * 8);
     }
     if (e.isBuilding) {
-      updateBuildingAI(gameState, e);
+      updateBuildingAI(gameState, e, frameCount);
     } else {
       if (e.fireCooldown > 0) e.fireCooldown--;
-      if (e.team !== TEAM_ENEMY) updateUnitAI(gameState, e);
+      if (e.team !== TEAM_ENEMY) updateUnitAI(gameState, e, frameCount);
     }
   }
   updateRepairBays(gameState, frameCount);
@@ -459,7 +483,7 @@ function notify(text, kind) {
 }
 
 function checkGameOver() {
-  var stillRunning = ui.checkGameOver(gameState, gameStartTime, difficulty, gameRunning);
+  var stillRunning = ui.checkGameOver(gameState, gameStartTime, difficulty, gameRunning, frameCount);
   if (!stillRunning) gameRunning = false;
 }
 
@@ -541,6 +565,8 @@ function loadGame() {
     enemyAI.scoutTimer = aiState.scoutTimer || 0;
   }
   gameStartTime = result.gameStartTime;
+  lastFrameTime = 0;
+  simulationAccumulator = 0;
   selectedUnits.length = 0;
   selectedBuilding = null;
   // 存档会还原 selected 标记，但选中列表已被清空，需同步清理，否则残留绿色选中框

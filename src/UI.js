@@ -1,4 +1,4 @@
-import { TEAM_PLAYER, TEAM_ENEMY, TILE_SIZE } from './constants.js';
+import { TEAM_PLAYER, TEAM_ENEMY, TILE_SIZE, FPS } from './constants.js';
 import { BUILDING_DEFS, DEFENSE_DEFS, UNIT_DEFS, FACTION_ALLIED, FACTION_NAMES } from './definitions.js';
 
 // 单位面板按兵种分组，避免步兵/坦克/飞机/舰船混排
@@ -252,7 +252,8 @@ export class UIManager {
       dom.resUnits.className = unitsClass;
     }
 
-    var el = Math.floor((Date.now() - gameStartTime) / 1000);
+    // 游戏时间跟随模拟帧：暂停不计时，1×/2×/4× 与存档恢复口径一致。
+    var el = Math.floor(frameCount / FPS);
     var mm = Math.floor(el / 60), ss = el % 60;
     var timeText = (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
     if (last.time !== timeText) { last.time = timeText; dom.gameTime.textContent = timeText; }
@@ -415,7 +416,7 @@ export class UIManager {
     }
   }
 
-  checkGameOver(gameState, gameStartTime, difficulty, gameRunning) {
+  checkGameOver(gameState, gameStartTime, difficulty, gameRunning, frameCount) {
     if (gameState.gameOver) {
       var dom = this._dom;
       dom.gameOver.style.display = 'flex';
@@ -426,7 +427,7 @@ export class UIManager {
         dom.gameOverText.textContent = 'DEFEATED'; dom.gameOverText.style.color = '#c0392b';
         dom.gameOverSub.textContent = '\u4f60\u7684\u57fa\u5730\u88ab\u6467\u6bc1\u4e86';
       }
-      var elapsed = Math.floor((Date.now() - gameStartTime) / 1000);
+      var elapsed = Math.floor(frameCount / FPS);
       var mins = Math.floor(elapsed / 60), secs = elapsed % 60;
       dom.gameStats.innerHTML =
         '<span class="label">\u6e38\u620f\u65f6\u957f</span><span class="value">' + mins + ':' + (secs < 10 ? '0' : '') + secs + '</span>' +

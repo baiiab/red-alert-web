@@ -501,6 +501,7 @@ export class GameMap {
       if (!this.isPassable(x, y)) return false;
       
       const e2 = 2 * err;
+      const oldX = x, oldY = y;
       if (e2 > -dy) {
         err -= dy;
         x += sx;
@@ -509,6 +510,9 @@ export class GameMap {
         err += dx;
         y += sy;
       }
+      // 与 A* 的对角规则一致：两个正交邻格任一被挡，都不能穿角。
+      if (x !== oldX && y !== oldY &&
+          (!this.isPassable(oldX + sx, oldY) || !this.isPassable(oldX, oldY + sy))) return false;
     }
     
     return true;

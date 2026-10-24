@@ -90,6 +90,7 @@ export class GameState {
         const e = this.entities[i];
         if (!e.dead && (e.type === 'refinery' || e.type === 'base')) this._refineryCache[e.team].push(e);
       }
+      this._refineryDirty = false;
     }
     return this._refineryCache[team];
   }

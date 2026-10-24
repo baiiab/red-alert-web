@@ -22,6 +22,8 @@ export class Renderer {
     this.oreCache = [];     // [crystals][variant] → 预渲染晶体层（透明底，alpha 由 globalAlpha 控制）
     this.minimapTerrainCanvas = null;
     this.minimapTerrainDirty = true;
+    this.minimapTerrainFrame = -120;
+    this.lastMinimapRender = -Infinity;
   }
 
   getSortedEntities(gameState) {
@@ -537,6 +539,10 @@ export class Renderer {
   }
 
   renderMinimap(gameState, camera, frameCount, viewWidth) {
+    // 小地图 20Hz 足够跟手；暂停时也按真实时间刷新，不依赖模拟帧号。
+    var now = performance.now();
+    if (now - this.lastMinimapRender < 50) return;
+    this.lastMinimapRender = now;
     var minimapCtx = this.minimapCtx;
     var minimapCanvas = this.minimapCanvas;
     var mw = minimapCanvas.width, mh = minimapCanvas.height;
@@ -548,7 +554,8 @@ export class Renderer {
       this.minimapTerrainCanvas.height = mh;
       this.minimapTerrainDirty = true;
     }
-    if (this.minimapTerrainDirty || frameCount % 120 === 0) {
+    if (this.minimapTerrainDirty || frameCount < this.minimapTerrainFrame ||
+        frameCount - this.minimapTerrainFrame >= 120) {
       var tCtx = this.minimapTerrainCanvas.getContext('2d');
       tCtx.fillStyle = '#060610';
       tCtx.fillRect(0, 0, mw, mh);
@@ -567,6 +574,7 @@ export class Renderer {
         }
       }
       this.minimapTerrainDirty = false;
+      this.minimapTerrainFrame = frameCount;
     }
 
     minimapCtx.drawImage(this.minimapTerrainCanvas, 0, 0);

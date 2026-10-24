@@ -149,6 +149,7 @@ export function updateProjectiles(gameState) {
         gameState.addExplosion(p.targetX, p.targetY, 24, 'fire');
         gameState.applySplashDamage(p.targetX, p.targetY, p.splash, Math.floor(p.damage * 0.5), p.team);
       }
+      // 保留绘制顺序；swap-remove 在常见 200 弹规模无收益，不为此改变视觉语义。
       gameState.projectiles.splice(i, 1);
     } else {
       p.x += dx / dist * p.speed;
